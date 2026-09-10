@@ -12,7 +12,7 @@ import {
   compressAndSend
 } from "./internal/compression";
 import { MIME_TYPES } from "./internal/mimeTypes";
-import { Router } from "./internal/router";
+import { Router, EMPTY_OBJECT } from "./internal/router";
 import {
   frameworkError,
   ErrorCode,
@@ -34,13 +34,11 @@ import type {
 
 import type { ResolvedCompressionConfig } from "./internal/types";
 
-const empty_object = Object.freeze({});
-
 export class CpeakIncomingMessage extends http.IncomingMessage {
   // We define body and params here for better V8 optimization (not changing the shape of the object at runtime)
   public body: any = undefined;
   // users shouldn't be able to mutate params.
-  public params: StringMap = empty_object;
+  public params: StringMap = EMPTY_OBJECT;
 
   #query?: StringMap;
 
@@ -55,7 +53,7 @@ export class CpeakIncomingMessage extends http.IncomingMessage {
     const qIndex = url.indexOf("?");
 
     if (qIndex === -1) {
-      this.#query = empty_object;
+      this.#query = EMPTY_OBJECT;
     } else {
       const searchParams = new URLSearchParams(url.substring(qIndex + 1));
       this.#query = Object.fromEntries(searchParams.entries());

@@ -1,7 +1,7 @@
 import type { Handler, RouteMiddleware, StringMap } from "../types";
 import { frameworkError, ErrorCode } from "./errors";
 
-const EMPTY_PARAMS = Object.freeze({}) as StringMap;
+export const EMPTY_OBJECT = Object.freeze({});
 
 // A node in our radix tree. Each one can hold up to three kinds of children:
 // an exact static segment, a single ":param" placeholder, or a tail "*"
@@ -155,7 +155,7 @@ export class Router {
       staticMethodRoute.set(path, {
         middleware,
         handler,
-        params: EMPTY_PARAMS
+        params: EMPTY_OBJECT
       });
       return;
     }
