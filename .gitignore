@@ -4,3 +4,13 @@ node_modules
 playground.js
 dist
 .vscode
+.idea
+*.swp
+.claude/settings.local.json
+target
+.env
+.env.*
+!.env.example
+flamegraph.svg
+perf.data*
+*.profraw

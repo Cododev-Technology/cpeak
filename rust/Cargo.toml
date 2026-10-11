@@ -1,0 +1,67 @@
+[package]
+name = "cpeak"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A minimal and incredibly fast Rust HTTP framework. The Rust port of the Cpeak Node.js framework."
+license = "MIT"
+repository = "https://github.com/Cododev-Technology/cpeak"
+homepage = "https://github.com/Cododev-Technology/cpeak/tree/main/rust"
+keywords = ["cpeak", "web", "http", "framework", "server"]
+categories = ["web-programming::http-server"]
+authors = ["Cododev Technology Inc."]
+readme = "README.md"
+
+[lib]
+name = "cpeak"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "macros", "net", "fs", "io-util", "sync", "time"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+bytes = "1"
+socket2 = { version = "0.6", features = ["all"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The same JSON as serde_json, written faster with SIMD (used for res.json)
+sonic-rs = "0.5"
+memchr = "2"
+mimalloc = { version = "0.1", default-features = false, optional = true }
+# zlib-rs: a pure Rust zlib that compresses faster than flate2's default backend
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+brotli = "8"
+# gzip and deflate for the bodies that are already in memory (res.json, small files, ...): it
+# only compresses whole buffers, and does that faster than a zlib that has to be ready for a
+# stream. It's C code, like mimalloc.
+libdeflater = "1"
+# TLS, for HTTPS (what the node:https module is in Node.js)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+getrandom = "0.3"
+httpdate = "1"
+regex = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[features]
+default = ["mimalloc"]
+# Use mimalloc as your program's memory allocator. Almost everything a request does (building
+# req.headers, parsing a JSON body, ...) allocates memory, and mimalloc does that a lot faster
+# than the system allocator, especially with many threads. Only one allocator can be set per
+# program, so turn this off (default-features = false) if your app sets its own #[global_allocator].
+mimalloc = ["dep:mimalloc"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+# The HTTPS tests need a client that speaks TLS
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+# Password hashing (PBKDF2) and compression are CPU heavy, so we optimize the
+# dependencies even in debug builds to keep the tests and examples snappy.
+[profile.dev.package."*"]
+opt-level = 3

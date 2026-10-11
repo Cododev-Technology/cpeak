@@ -11,12 +11,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Cododev-Technology/cpeak.git"
+    "url": "https://github.com/Cododev-Technology/cpeak.git",
+    "directory": "node"
   },
   "bugs": {
     "url": "https://github.com/Cododev-Technology/cpeak/issues"
   },
-  "homepage": "https://github.com/Cododev-Technology/cpeak#readme",
+  "homepage": "https://github.com/Cododev-Technology/cpeak/tree/main/node#readme",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -12,11 +12,15 @@
 
 ## Getting Started
 
+This repository holds both versions of Cpeak: the Node.js package is in `node/`, and the Rust crate is in `rust/`.
+
+### Cpeak for Node.js
+
 1. Clone the repository and install dependencies:
 
 ```
 git clone https://github.com/Cododev-Technology/cpeak.git
-cd cpeak
+cd cpeak/node
 npm install
 ```
 
@@ -36,7 +40,7 @@ npm test
 
 For testing your changes against an actual application, you can link your local cpeak build to any Node.js project using `npm link`:
 
-In the cpeak directory, start the build in watch mode and register the package globally:
+In the `node` directory, start the build in watch mode and register the package globally:
 
 ```
 npm run dev
@@ -50,6 +54,16 @@ npm link cpeak
 ```
 
 Any changes you make in cpeak will be rebuilt automatically and reflected in your test project immediately.
+
+### Cpeak for Rust
+
+Clone the repository, then build the crate and run its tests:
+
+```
+git clone https://github.com/Cododev-Technology/cpeak.git
+cd cpeak/rust
+cargo test
+```
 
 ---
 
@@ -115,17 +129,23 @@ security: sanitize file path in sendFile to prevent directory traversal
 
 ## Code Style
 
-This project uses [Prettier](https://prettier.io/) for formatting. Before submitting a PR, make sure your changes are formatted:
+The Node.js code uses [Prettier](https://prettier.io/) for formatting. Before submitting a PR, make sure your changes are formatted (in the `node` directory):
 
 ```
 npm run format
+```
+
+The Rust code uses rustfmt (in the `rust` directory):
+
+```
+cargo fmt
 ```
 
 ---
 
 ## Versioning
 
-Please do not modify `package.json` or `package-lock.json` to bump the version. Version bumps are handled by the maintainers as part of the release process.
+Please do not modify `package.json`, `package-lock.json` or `Cargo.toml` to bump the version. Version bumps are handled by the maintainers as part of the release process.
 
 ---
 
