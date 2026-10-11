@@ -60,22 +60,22 @@ export interface CpeakResponse<ResBody = any> extends ServerResponse {
 export type Next = (err?: any) => void;
 
 // beforeEach middleware: (req, res, next)
-export type Middleware<ReqBody = any, ReqParams = any> = (
-  req: CpeakRequest<ReqBody, ReqParams>,
-  res: CpeakResponse,
+export type Middleware<ReqBody = any, ReqQueries = any, ResBody = any> = (
+  req: CpeakRequest<ReqBody, ReqQueries>,
+  res: CpeakResponse<ResBody>,
   next: Next
 ) => unknown;
 
 // Route middleware: (req, res, next)
-export type RouteMiddleware<ReqBody = any, ReqParams = any> = (
-  req: CpeakRequest<ReqBody, ReqParams>,
-  res: CpeakResponse,
+export type RouteMiddleware<ReqBody = any, ReqQueries = any, ResBody = any> = (
+  req: CpeakRequest<ReqBody, ReqQueries>,
+  res: CpeakResponse<ResBody>,
   next: Next
 ) => unknown;
 
 // Route handlers: (req, res)
-export type Handler<ReqBody = any, ReqParams = any, ResBody = any> = (
-  req: CpeakRequest<ReqBody, ReqParams>,
+export type Handler<ReqBody = any, ReqQueries = any, ResBody = any> = (
+  req: CpeakRequest<ReqBody, ReqQueries>,
   res: CpeakResponse<ResBody>
 ) => unknown;
 

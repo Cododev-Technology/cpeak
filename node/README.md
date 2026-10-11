@@ -10,7 +10,7 @@ Cpeak replaces Express.js, body-parser, cookie-parser, compression, CORS, Passpo
 
 Cpeak currently has almost all the features of Express.js, with roughly the same performance as Fastify. Additionally, it has a codebase that you can easily navigate, audit and change if you want. *Benchmarks and test results, and videos on navigating and understanding the codebase will be added soon.*
 
-While Cpeak is being built for production, it is also an educational project that was started as part of the [Understanding Node.js: Core Concepts](https://www.udemy.com/course/understanding-nodejs-core-concepts/?referralCode=0BC21AC4DD6958AE6A95) course. If you want to learn how to build a framework like this, and get to a point where you can build things like this yourself and beyond, check out this course!
+Cpeak started as an educational project, and now it's being used for production. At Cododev we build real products, get real users, and then use them to offer a unique kind of education for the age of AI. To see how we teach, and some of the products built with Cpeak, visit [cododev.ca](https://www.cododev.ca).
 
 ## Why Cpeak?
 
@@ -29,6 +29,7 @@ While Cpeak is being built for production, it is also an educational project tha
   - [Middleware](#middleware)
   - [Route Handling](#route-handling)
   - [Route Middleware](#route-middleware)
+  - [TypeScript](#typescript)
   - [Fallback Handler](#fallback-handler)
   - [URL Variables & Parameters](#url-variables--parameters)
   - [Sending Files](#sending-files)
@@ -175,6 +176,50 @@ server.route("patch", "/the-path-you-want", (req, res) => {
 First add the HTTP method name you want to handle, then the path, and finally, the callback. The `req` and `res` object types are the same as in the Node.js HTTP module (`http.IncomingMessage` and `http.ServerResponse`). You can read more about them in the [official Node.js documentation](https://nodejs.org/docs/latest/api/http.html).
 
 Under the hood, Cpeak stores your routes in a radix tree, so finding the right route for an incoming request is roughly O(log n) in your total route count. In plain terms, that means matching stays fast even when your app has hundreds or thousands of routes. You won't pay a linear scan per request as your route table grows.
+
+### TypeScript
+
+Cpeak is written in TypeScript. `CpeakRequest` and `CpeakResponse` both accept generics, so you can type a route's request body, query string, and response body without casting inside the handler:
+
+```typescript
+import cpeak, { CpeakRequest, CpeakResponse } from "cpeak";
+
+interface CreatePostBody {
+  title: string;
+  content: string;
+}
+
+interface CreatePostResponse {
+  id: number;
+  title: string;
+}
+
+const server = cpeak();
+
+server.route(
+  "post",
+  "/posts",
+  async (
+    req: CpeakRequest<CreatePostBody>,
+    res: CpeakResponse<CreatePostResponse>
+  ) => {
+    const { title, content } = req.body ?? {};
+
+    if (!title) throw { status: 400, message: "title is required" };
+
+    const post = await db.createPost({ title, content });
+
+    return res.json({ id: post.id, title: post.title }); // checked against CreatePostResponse
+  }
+);
+```
+
+A few things worth knowing:
+
+- **`req.body` can be `undefined`.** If a request doesn't come with `Content-Type: application/json`, there's no body to read. So grab your fields from `req.body ?? {}` like above. TypeScript then knows each field might be missing: `title` above is `string | undefined`, not `string`.
+- **The second generic is for `req.query`, not `req.params`.** `CpeakRequest<ReqBody, ReqQueries>` types the body and the query string. Route params like `/:id` are always strings, and there's no way to type them yet.
+
+The same generics are available on `Middleware<ReqBody, ReqQueries, ResBody>` for `server.beforeEach` and route-level middleware.
 
 ### Fallback Handler
 
