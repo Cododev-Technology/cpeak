@@ -12,7 +12,7 @@ The two versions have the same API, the same names and the same concepts, so if 
 
 Both give you routing, middleware functions, JSON parsing, cookie parsing, CORS, compression, authentication and more, with a codebase that you can easily navigate, audit and change if you want. The Rust codebase mirrors the Node.js one file by file.
 
-While Cpeak is being built for production, it is also an educational project that was started as part of the [Understanding Node.js: Core Concepts](https://www.udemy.com/course/understanding-nodejs-core-concepts/?referralCode=0BC21AC4DD6958AE6A95) course. If you want to learn how to build a framework like this, and get to a point where you can build things like this yourself and beyond, check out this course!
+Cpeak started as an educational project, and now it's being used for production. At Cododev we build real products, get real users, and then use them to offer a unique kind of education for the age of AI. To see how we teach, and some of the products built with Cpeak, visit [cododev.ca](https://www.cododev.ca).
 
 ## Cpeak for Node.js
 

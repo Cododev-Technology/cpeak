@@ -8,7 +8,7 @@ Cpeak gives you routing, middleware functions, JSON parsing, cookie parsing, COR
 
 Cpeak for Rust has all the features of the Node.js version of Cpeak, and it uses every CPU core of your machine out of the box. Additionally, it has a codebase that you can easily navigate, audit and change if you want. It mirrors the Node.js codebase file by file, with the same names and the same comments. _Benchmarks and test results, and videos on navigating and understanding the codebase will be added soon._
 
-While Cpeak is being built for production, it is also an educational project that was started as part of the [Understanding Node.js: Core Concepts](https://www.udemy.com/course/understanding-nodejs-core-concepts/?referralCode=0BC21AC4DD6958AE6A95) course. If you want to learn how to build a framework like this, and get to a point where you can build things like this yourself and beyond, check out this course!
+Cpeak started as an educational project, and we now run our own products on it. At Cododev we build real products, get real users, and then use them to offer a unique kind of education for the age of AI. To see how we teach, and some of the products built with Cpeak, visit [cododev.ca](https://www.cododev.ca).
 
 ## Why Cpeak?
 
@@ -28,6 +28,8 @@ While Cpeak is being built for production, it is also an educational project tha
   - [Route Middleware](#route-middleware)
   - [Fallback Handler](#fallback-handler)
   - [URL Variables & Parameters](#url-variables--parameters)
+  - [Reading the Request Body](#reading-the-request-body)
+  - [Sending a Response](#sending-a-response)
   - [Sending Files](#sending-files)
   - [Redirecting](#redirecting)
   - [MIME Types](#mime-types)
@@ -232,6 +234,71 @@ server.route("patch", "/test/:title/more-text", async |req, res| {
 ```
 
 Both `req.params` and `req.query` are a `HashMap<String, String>`, so use `.get()` when a value might be missing.
+
+### Reading the Request Body
+
+A JSON body is read and parsed for you by [parse_json](#parse_json). For any other body, like plain text or a file upload, use `req.chunk()`. It's what `req.on("data", ...)` is in Node.js: every call gives you the next chunk of the body, and `None` once the whole body has been read.
+
+```rust
+server.route("post", "/upload", async |req, res| {
+    let mut size = 0;
+
+    while let Some(chunk) = req.chunk().await? {
+        // Do something with this chunk: write it to a file, hash it, pass it on...
+        size += chunk.len();
+    }
+
+    return res.json(json!({ "received": size }));
+});
+```
+
+The body is read from the client as you ask for it, so an upload of any size takes up very little memory.
+
+If you want the whole body in one piece, collect the chunks:
+
+```rust
+server.route("post", "/notes", async |req, res| {
+    let mut body = Vec::new();
+    while let Some(chunk) = req.chunk().await? {
+        body.extend_from_slice(&chunk);
+    }
+    let note = String::from_utf8_lossy(&body);
+
+    // rest of your logic...
+    return res.status(201).json(json!({ "length": note.len() }));
+});
+```
+
+### Sending a Response
+
+For a response that isn't JSON or a file, set your headers and finish with `res.end()`. They are what `res.setHeader()` and `res.end()` are in Node.js:
+
+```rust
+server.route("get", "/hello", async |req, res| {
+    return res
+        .set_header("Content-Type", "text/plain")
+        .end("Hello there!");
+});
+```
+
+`res.end()` takes the body (a `String`, a `Vec<u8>`, a string literal, ...), or `""` for none. `res.set_header()` replaces a header that's already set. To add another one with the same name (like a second `Set-Cookie`), use `res.append_header()`.
+
+To send the body in pieces, use `res.write()`. The status and the headers go out with the first piece:
+
+```rust
+use std::time::Duration;
+
+server.route("get", "/countdown", async |req, res| {
+    res.set_header("Content-Type", "text/plain");
+
+    for number in (1..=3).rev() {
+        res.write(format!("{number}\n")).await?;
+        cpeak::sleep(Duration::from_secs(1)).await;
+    }
+
+    return res.end("Liftoff!\n");
+});
+```
 
 ### Sending Files
 
