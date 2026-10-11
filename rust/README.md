@@ -1,12 +1,13 @@
 # Cpeak
 
 [![crates.io](https://img.shields.io/crates/v/cpeak.svg)](https://crates.io/crates/cpeak)
+[![HTTP Arena H/1.1](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/cpeak/h1.json)](https://www.http-arena.com/#type=emerging,flagship&tuned=1)
 
-Cpeak is a minimal and fast Rust framework. Our goal is to be one of the fastest HTTP frameworks available on the internet. It's the Rust port of the [Cpeak Node.js framework](https://github.com/Cododev-Technology/cpeak/tree/main/node), with the same API, the same names and the same concepts. You would use Cpeak Node.js if you want maximum development speed, and Cpeak for Rust if you want the best performance, control and memory usage over your application.
+Cpeak is a minimal and fast Rust framework. As of October 2026, it's ranked #1 of 95 frameworks on the [HttpArena](https://www.http-arena.com/) HTTP/1.1 leaderboard, surpassing Drogon (C++), Vert.x (Java), Bun (TS), Actix Web (Rust) and others. It's the Rust port of the [Cpeak Node.js framework](https://github.com/Cododev-Technology/cpeak/tree/main/node), with the same API, the same names and the same concepts. You would use Cpeak Node.js if you want maximum development speed, and Cpeak for Rust if you want the best performance, control and memory usage over your application.
 
 Cpeak gives you routing, middleware functions, JSON parsing, cookie parsing, CORS, compression, authentication and more. Built on top of [tokio](https://tokio.rs) and [hyper](https://hyper.rs). If you know Express.js or the Node.js version of Cpeak, you already know how to use it.
 
-Cpeak for Rust has all the features of the Node.js version of Cpeak, and it uses every CPU core of your machine out of the box. Additionally, it has a codebase that you can easily navigate, audit and change if you want. It mirrors the Node.js codebase file by file, with the same names and the same comments. _Benchmarks and test results, and videos on navigating and understanding the codebase will be added soon._
+Cpeak for Rust has all the features of the Node.js version of Cpeak, and it uses every CPU core of your machine out of the box. Additionally, it has a codebase that you can easily navigate, audit and change if you want. It mirrors the Node.js codebase file by file, with the same names and the same comments. On HttpArena's 64-core machine it handles 2.59 million plain requests per second, and 1.28 million JSON responses per second over TLS. You can see all the results [here](https://www.http-arena.com/frameworks/cpeak/). _Videos on navigating and understanding the codebase will be added soon._
 
 Cpeak started as an educational project, and we now run our own products on it. At Cododev we build real products, get real users, and then use them to offer a unique kind of education for the age of AI. To see how we teach, and some of the products built with Cpeak, visit [cododev.ca](https://www.cododev.ca).
 

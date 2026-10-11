@@ -2,13 +2,14 @@
 
 [![npm version](https://badge.fury.io/js/cpeak.svg)](https://www.npmjs.com/package/cpeak)
 [![crates.io](https://img.shields.io/crates/v/cpeak.svg)](https://crates.io/crates/cpeak)
+[![HTTP Arena H/1.1](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/cpeak/h1.json)](https://www.http-arena.com/#type=emerging,flagship&tuned=1)
 
 Cpeak is a minimal and fast HTTP framework for Node.js and for Rust.
 
 The two versions have the same API, the same names and the same concepts, so if you know one, you already know how to use the other:
 
 - **[Cpeak for Node.js](node)**: use it if you want maximum development speed with the speed of Fastify, and features of Express.js. Cpeak for Node.js has <strong>zero dependencies</strong>.
-- **[Cpeak for Rust](rust)**: use it if you want the best performance, control and memory usage over your application. Cpeak for rust is one of the <strong>fastest HTTP frameworks on the internet</strong>.
+- **[Cpeak for Rust](rust)**: use it if you want the best performance, control and memory usage over your application. As of October 2026, Cpeak for Rust is <strong>ranked #1</strong> on the [HttpArena](https://www.http-arena.com/) HTTP/1.1 leaderboard, surpassing Drogon (C++), Vert.x (Java), Bun (TS), Actix Web (Rust) and others.
 
 Both give you routing, middleware functions, JSON parsing, cookie parsing, CORS, compression, authentication and more, with a codebase that you can easily navigate, audit and change if you want. The Rust codebase mirrors the Node.js one file by file.
 
