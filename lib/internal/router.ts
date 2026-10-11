@@ -1,6 +1,8 @@
 import type { Handler, RouteMiddleware, StringMap } from "../types";
 import { frameworkError, ErrorCode } from "./errors";
 
+export const EMPTY_OBJECT = Object.freeze({});
+
 // A node in our radix tree. Each one can hold up to three kinds of children:
 // an exact static segment, a single ":param" placeholder, or a tail "*"
 // wildcard. The handler and middleware here belong to the route whose path
@@ -43,6 +45,8 @@ function createNode(): RadixNode {
 // coexist without conflict because they live in separate trees.
 export class Router {
   #treesByMethod: Map<string, RadixNode> = new Map();
+
+  #staticRouterPerMethod: Map<string, Map<string, RouteMatch>> = new Map();
 
   add(
     method: string,
@@ -139,10 +143,34 @@ export class Router {
     currentNode.handler = handler;
     currentNode.middleware = middleware;
     currentNode.paramNames = paramNames;
+
+    const is_static = !path.includes(":") && !path.includes("*");
+    if (is_static) {
+      let staticMethodRoute = this.#staticRouterPerMethod.get(methodKey);
+      // create a new map for the Method
+      if (!staticMethodRoute) {
+        staticMethodRoute = new Map();
+        this.#staticRouterPerMethod.set(methodKey, staticMethodRoute);
+      }
+      staticMethodRoute.set(path, {
+        middleware,
+        handler,
+        params: EMPTY_OBJECT
+      });
+      return;
+    }
   }
 
   find(method: string, path: string): RouteMatch | null {
-    const root = this.#treesByMethod.get(method.toLowerCase());
+    const methodKey = method.toLowerCase();
+
+    const staticMap = this.#staticRouterPerMethod.get(methodKey);
+    if (staticMap !== undefined) {
+      const cachedResult = staticMap.get(path);
+      if (cachedResult !== undefined) return cachedResult;
+    }
+
+    const root = this.#treesByMethod.get(methodKey);
     if (!root) return null;
 
     const segments = splitPath(path);
