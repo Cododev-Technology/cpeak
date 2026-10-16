@@ -134,9 +134,14 @@ fn append_vary(res: &mut CpeakResponse, value: &str) {
 
 // Brotli options. The max quality is 11, which is really slow for live
 // responses. We go with 4 unless the developer specifies otherwise.
+//
+// The window is 512KB (lgwin 19), like nginx's. Brotli sets aside twice its window in memory
+// for every response over 64KB, so with the 4MB window that brotli itself defaults to, a
+// 75KB response takes 8MB to compress. Only a body bigger than the window gets smaller with
+// a bigger one: a 2MB JavaScript bundle by about 3%.
 fn brotli_opts_for(config: &ResolvedCompressionConfig) -> (u32, u32) {
     let quality = config.brotli.quality.unwrap_or(4).min(11);
-    let lgwin = config.brotli.lgwin.unwrap_or(22).clamp(10, 24);
+    let lgwin = config.brotli.lgwin.unwrap_or(19).clamp(10, 24);
     (quality, lgwin)
 }
 

@@ -402,7 +402,7 @@ Or pass options to tune the behavior:
 let mut server = Cpeak::new(CpeakOptions {
     compression: Some(CompressionOptions {
         threshold: 1024, // bytes — responses smaller than this are sent uncompressed. Default: 1024
-        brotli: BrotliOptions { quality: Some(4), lgwin: Some(22) }, // quality from 0 to 11. Default: 4
+        brotli: BrotliOptions { quality: Some(4), lgwin: Some(19) }, // quality from 0 to 11. Default: 4
         gzip: ZlibOptions { level: Some(6) },    // level from 0 to 9. Default: 6
         deflate: ZlibOptions { level: Some(6) }, // level from 0 to 9. Default: 6
     }),

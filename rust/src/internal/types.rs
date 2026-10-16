@@ -23,7 +23,7 @@ impl Default for CompressionOptions {
 pub struct BrotliOptions {
     // From 0 to 11. Default: 4 (11 is the max, which is really slow for live responses)
     pub quality: Option<u32>,
-    // Base-2 logarithm of the sliding window size, from 10 to 24. Default: 22
+    // Base-2 logarithm of the sliding window size, from 10 to 24. Default: 19 (512KB)
     pub lgwin: Option<u32>,
 }
 
