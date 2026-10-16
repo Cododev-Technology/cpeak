@@ -40,6 +40,7 @@ Cpeak started as an educational project, and we now run our own products on it. 
   - [Waiting](#waiting)
   - [Listening](#listening)
   - [HTTPS](#https)
+  - [TLS in the Rest of Your App](#tls-in-the-rest-of-your-app)
   - [Crypto](#crypto)
   - [Util Functions](#util-functions)
     - [serve_static](#serve_static)
@@ -615,6 +616,20 @@ fn main() {
 ```
 
 Under the hood this is [rustls](https://github.com/rustls/rustls), with TLS 1.3 and 1.2.
+
+### TLS in the Rest of Your App
+
+Your app will likely use TLS for more than its own server: to call an API over HTTPS, to connect to a managed database or to Redis. In Node.js the TLS library comes with the runtime, so you never have to choose one. Cpeak does the same for a Rust program: the first time you create a server, it makes [ring](https://github.com/briansmith/ring), the crypto library of its own HTTPS server, the one that everything built on rustls in your program uses.
+
+So for the crates that give you the choice, go with rustls and let the program decide on the crypto library, without bringing in a second one:
+
+```toml
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+redis = { version = "1", default-features = false, features = ["tokio-comp", "tokio-rustls-comp"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "tls-rustls-ring"] }
+```
+
+If your app picks a crypto library itself (`install_default()` of rustls) before it creates the server, Cpeak leaves that one in place.
 
 ### Crypto
 

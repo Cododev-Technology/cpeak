@@ -24,6 +24,17 @@ use rustls::{ServerConfig, ServerConnection};
 
 use crate::internal::types::HttpsOptions;
 
+// rustls can work with more than one crypto library, and a program has to settle on one of
+// them. In Node.js the TLS library comes with the runtime, so an app never has to choose.
+// Here Cpeak makes that choice for the whole program: ring, the one its own HTTPS server
+// uses. The other crates of your app that use rustls (an HTTP client, a database client, a
+// Redis client, ...) then work without anyone picking one for them.
+//
+// If your app picked one before Cpeak got to it, that one stays.
+pub(crate) fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 // What an HTTPS server keeps of its options: the certificate and the key, read once
 pub(crate) type ResolvedHttpsConfig = Arc<ServerConfig>;
 

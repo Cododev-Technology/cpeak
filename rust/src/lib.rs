@@ -640,6 +640,9 @@ pub struct Cpeak {
 
 impl Cpeak {
     pub fn new(options: CpeakOptions) -> Self {
+        // The crypto library for everything in the program that uses rustls (see internal/tls.rs)
+        internal::tls::install_crypto_provider();
+
         // Resolve compression options once at app startup.
         let compression = options.compression.map(resolve_compression_options);
 
