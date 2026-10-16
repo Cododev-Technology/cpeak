@@ -31,6 +31,7 @@ Cpeak started as an educational project, and we now run our own products on it. 
   - [URL Variables & Parameters](#url-variables--parameters)
   - [Reading the Request Body](#reading-the-request-body)
   - [Sending a Response](#sending-a-response)
+  - [After the Response Is Sent](#after-the-response-is-sent)
   - [Sending Files](#sending-files)
   - [Redirecting](#redirecting)
   - [MIME Types](#mime-types)
@@ -300,6 +301,33 @@ server.route("get", "/countdown", async |req, res| {
     return res.end("Liftoff!\n");
 });
 ```
+
+### After the Response Is Sent
+
+To run some code once a response has been sent (to log the request, for example), use `res.on_finish()`. It's what `res.on("finish", ...)` is in Node.js:
+
+```rust
+use std::time::Instant;
+
+server.before_each(async |req, res, next| {
+    let started = Instant::now();
+    let method = req.method.clone();
+    let url = req.url.clone();
+
+    res.on_finish(move |res| {
+        println!(
+            "{method} {url} {} {} -- {} ms",
+            res.status_code,
+            res.status_message,
+            started.elapsed().as_millis()
+        );
+    });
+
+    next()
+});
+```
+
+Your function gets the status code and the status message that the response went out with (`res.statusCode` and `res.statusMessage` in Node.js), so add it before the response ends, like in a middleware function. You can add as many as you want, and they run in the order you added them. A response that is cut off instead of finished (an error after its headers were sent) doesn't run them.
 
 ### Sending Files
 

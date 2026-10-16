@@ -17,6 +17,7 @@ use std::fmt::{Display, Write as _};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
@@ -24,7 +25,7 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use hyper::body::Incoming;
 use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
-use hyper::Uri;
+use hyper::{StatusCode, Uri};
 use serde::Serialize;
 
 use crate::internal::compression::{
@@ -175,6 +176,8 @@ pub struct CpeakResponse {
     headers_sent: bool,
     finished: bool,
     sender: ResponseSender,
+    // The functions to run once the response is sent (res.on_finish())
+    finish_listeners: Vec<Box<dyn FnOnce(&FinishedResponse)>>,
 
     // Set per-request from the Cpeak instance (the worker's own copy of it). None when compression isn't enabled.
     pub(crate) compression: Option<Rc<ResolvedCompressionConfig>>,
@@ -196,6 +199,7 @@ impl CpeakResponse {
             headers_sent: false,
             finished: false,
             sender,
+            finish_listeners: Vec::new(),
             compression: None,
             req_is_head: req.method == "HEAD",
             req_accept_encoding: req
@@ -472,7 +476,34 @@ impl CpeakResponse {
             self.sender
                 .send_head(self.status_code, headers, ResponseBody::Full(Some(data)));
         }
+        self.emit_finish();
         Ok(())
+    }
+
+    // Run a function once the response is sent, like res.on("finish", ...) in Node.js.
+    // It gets the status that the response went out with, so add it before the response ends
+    // (in a middleware function, for example). It doesn't run for a response that was
+    // destroyed instead of finished.
+    pub fn on_finish(&mut self, listener: impl FnOnce(&FinishedResponse) + 'static) -> &mut Self {
+        self.finish_listeners.push(Box::new(listener));
+        self
+    }
+
+    // Run the on_finish() functions, in the order they were added
+    fn emit_finish(&mut self) {
+        if self.finish_listeners.is_empty() {
+            return;
+        }
+        let finished = FinishedResponse {
+            status_code: self.status_code,
+            status_message: status_message(self.status_code),
+        };
+        for listener in std::mem::take(&mut self.finish_listeners) {
+            // The response is already out, so a panic in here has nowhere to go
+            if catch_unwind(AssertUnwindSafe(|| listener(&finished))).is_err() {
+                eprintln!("[cpeak] A function passed to res.on_finish() panicked");
+            }
+        }
     }
 
     // Drop the connection without finishing the response, like req.socket.destroy() in Node.js
@@ -495,6 +526,22 @@ impl CpeakResponse {
             panic!("Cannot set headers after they are sent to the client");
         }
     }
+}
+
+// What a function passed to res.on_finish() gets: the status that the response went out with
+// (res.statusCode and res.statusMessage in Node.js)
+#[derive(Debug, Clone, Copy)]
+pub struct FinishedResponse {
+    pub status_code: u16,
+    pub status_message: &'static str,
+}
+
+// The reason phrase that hyper sends along with a status code, like "Not Found" for 404
+fn status_message(status_code: u16) -> &'static str {
+    StatusCode::from_u16(status_code)
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+        .canonical_reason()
+        .unwrap_or("<none>")
 }
 
 fn header_pair(name: &str, value: impl Display) -> (HeaderName, HeaderValue) {
