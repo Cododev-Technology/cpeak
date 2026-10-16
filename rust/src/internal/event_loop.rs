@@ -131,3 +131,10 @@ pub fn run<F: Future>(future: F) -> F::Output {
     tls::install_crypto_provider();
     EVENT_LOOP.block_on(future)
 }
+
+// Makes this the event loop that the calling thread sets things up on, for as long as what
+// it returns is around
+#[cfg(unix)]
+pub(crate) fn enter() -> tokio::runtime::EnterGuard<'static> {
+    EVENT_LOOP.enter()
+}

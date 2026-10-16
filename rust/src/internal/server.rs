@@ -36,6 +36,7 @@ use socket2::{Domain, Socket, Type};
 use tokio::sync::{mpsc, watch};
 
 use crate::internal::event_loop;
+use crate::internal::shutdown;
 use crate::internal::socket;
 use crate::internal::timers;
 use crate::internal::tls;
@@ -539,6 +540,12 @@ impl CpeakServer {
             .unwrap_or_else(|error| panic!("[cpeak] Failed to wait for the server: {error}"))
             .block_on(self.into_future());
     }
+
+    // Resolves once every connection is closed and the workers have stopped
+    pub(crate) async fn stopped(&self) {
+        let mut running_workers = self.running_workers.clone();
+        let _ = running_workers.wait_for(|running| *running == 0).await;
+    }
 }
 
 impl IntoFuture for CpeakServer {
@@ -546,9 +553,15 @@ impl IntoFuture for CpeakServer {
     type IntoFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
     fn into_future(self) -> Self::IntoFuture {
-        let mut running_workers = self.running_workers;
         Box::pin(async move {
-            let _ = running_workers.wait_for(|running| *running == 0).await;
+            self.stopped().await;
+
+            // The program was asked to stop (SIGTERM). It exits by itself once the functions
+            // passed to cpeak::on_shutdown() are done, and until then whoever waits for the
+            // server keeps waiting, so a `fn main` doesn't return before they have run.
+            if shutdown::is_shutting_down() {
+                std::future::pending::<()>().await;
+            }
         })
     }
 }
@@ -617,11 +630,14 @@ pub(crate) fn listen(
 
     callback();
 
-    CpeakServer {
+    let server = CpeakServer {
         address: local_address,
         closed: Arc::new(closed),
         running_workers: running_workers_receiver,
-    }
+    };
+    // So the server closes when the program is asked to stop (SIGTERM)
+    shutdown::add_server(server.clone());
+    server
 }
 
 struct WorkerStopped(Arc<watch::Sender<usize>>);

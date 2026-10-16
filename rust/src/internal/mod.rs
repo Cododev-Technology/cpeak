@@ -7,6 +7,7 @@ pub(crate) mod json;
 pub(crate) mod mime_types;
 pub(crate) mod router;
 pub(crate) mod server;
+pub(crate) mod shutdown;
 pub(crate) mod socket;
 pub(crate) mod timers;
 pub(crate) mod tls;

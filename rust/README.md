@@ -43,6 +43,7 @@ Cpeak started as an educational project, and we now run our own products on it. 
   - [Blocking Work](#blocking-work)
   - [Without a Server](#without-a-server)
   - [Listening](#listening)
+  - [Shutting Down](#shutting-down)
   - [HTTPS](#https)
   - [TLS in the Rest of Your App](#tls-in-the-rest-of-your-app)
   - [Crypto](#crypto)
@@ -674,6 +675,22 @@ println!("Listening on {}", running.address());
 running.close();
 running.wait(); // returns once every connection is closed
 ```
+
+### Shutting Down
+
+PM2, systemd, Docker and Kubernetes all stop a program the same way: they send it `SIGTERM`. When that happens, Cpeak shuts your app down gracefully. The server stops accepting new connections, the requests in progress get to finish, and then the program exits.
+
+If your app has things to close on its way out, pass them to `cpeak::on_shutdown`. It's what `process.on("SIGTERM", ...)` is in Node.js:
+
+```rust
+cpeak::on_shutdown(async || {
+    pool.close().await;
+});
+```
+
+Your function runs once the requests in progress are done, and the program exits (with code 0) when it's done too. You can add as many as you want, and they run in the order you added them. `server.wait()` doesn't return in the meantime, so there is nothing to add to your `fn main`.
+
+It works the same for a program [without a server](#without-a-server): the functions run when `SIGTERM` arrives, and then the program exits. (`SIGTERM` is a Unix thing, so on Windows this does nothing.)
 
 ### HTTPS
 

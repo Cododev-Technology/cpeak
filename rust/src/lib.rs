@@ -48,6 +48,7 @@ pub use crate::internal::compression::{Body, Readable};
 pub use crate::internal::errors::{framework_error, is_client_disconnect, CpeakError, ErrorCode};
 pub use crate::internal::event_loop::{run, spawn, spawn_blocking, spawn_local};
 pub use crate::internal::server::{CpeakServer, ListenAddress};
+pub use crate::internal::shutdown::on_shutdown;
 pub use crate::internal::timers::sleep;
 pub use crate::internal::types::{BrotliOptions, CompressionOptions, HttpsOptions, ZlibOptions};
 pub use crate::types::{
