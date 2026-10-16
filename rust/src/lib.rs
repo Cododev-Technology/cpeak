@@ -30,6 +30,7 @@ use serde::Serialize;
 
 use crate::internal::compression::{
     compress_and_send, compress_and_send_buffer, pipe, resolve_compression_options,
+    send_precompressed,
 };
 use crate::internal::errors::CatchUnwind;
 use crate::internal::files::{self, File};
@@ -224,10 +225,21 @@ impl CpeakResponse {
         path: &str,
         mime: impl Into<Option<&'a str>>,
     ) -> Result<(), CpeakError> {
+        self.send_file_or_copy(path, mime.into(), true).await
+    }
+
+    // `precompressed`: send the .br or .gz copy of the file instead, if cpeak::precompress()
+    // made one and the client takes it
+    pub(crate) async fn send_file_or_copy(
+        &mut self,
+        path: &str,
+        mime: Option<&str>,
+        precompressed: bool,
+    ) -> Result<(), CpeakError> {
         if self.headers_sent {
             return Ok(());
         }
-        let mime = match mime.into() {
+        let mime = match mime {
             Some(mime) => mime.to_string(),
             None => {
                 let file_extension = path
@@ -251,6 +263,10 @@ impl CpeakResponse {
         };
 
         let result = async {
+            if precompressed && send_precompressed(self, path, &mime).await? {
+                return Ok(());
+            }
+
             let size = match files::read(path)? {
                 File::NotAFile => {
                     return Err(framework_error(
@@ -913,8 +929,8 @@ impl Drop for RestoreRunning {
 
 // Util functions
 pub use crate::utils::{
-    auth, cookie_parser, cors, hash_password, parse_json, render, serve_static, sign_cookie,
-    swagger, verify_password,
+    auth, cookie_parser, cors, hash_password, parse_json, precompress, render, serve_static,
+    sign_cookie, swagger, verify_password,
 };
 
 pub use crate::utils::types::{

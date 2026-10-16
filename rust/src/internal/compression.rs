@@ -8,6 +8,7 @@ use flate2::Compression;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::internal::errors::CpeakError;
+use crate::internal::files::{self, File};
 use crate::internal::types::{CompressionOptions, ResolvedCompressionConfig};
 use crate::types::LocalBoxFuture;
 use crate::CpeakResponse;
@@ -32,7 +33,7 @@ impl Encoding {
 // Same as the /text|json|javascript|css|xml|svg/i regex of the Node.js version
 const COMPRESSIBLE_TYPE: [&str; 6] = ["text", "json", "javascript", "css", "xml", "svg"];
 
-fn is_compressible_type(mime: &str) -> bool {
+pub(crate) fn is_compressible_type(mime: &str) -> bool {
     let mime = mime.to_ascii_lowercase();
     COMPRESSIBLE_TYPE.iter().any(|kind| mime.contains(kind))
 }
@@ -54,6 +55,16 @@ const SMALL_BODY: usize = 64 * 1024;
 // Handles q=0 to disable an algorithm. Cpeak's preference is br > gzip > deflate, and for a
 // small body (see SMALL_BODY) gzip > br > deflate.
 fn pick_encoding(header: &str, small_body: bool) -> Option<Encoding> {
+    let preference = if small_body {
+        [Encoding::Gzip, Encoding::Br, Encoding::Deflate]
+    } else {
+        [Encoding::Br, Encoding::Gzip, Encoding::Deflate]
+    };
+    pick_from(header, &preference)
+}
+
+// The first of these algorithms that the client accepts
+fn pick_from(header: &str, preference: &[Encoding]) -> Option<Encoding> {
     if header.is_empty() {
         return None;
     }
@@ -98,12 +109,10 @@ fn pick_encoding(header: &str, small_body: bool) -> Option<Encoding> {
         q.is_some_and(|q| q > 0.0)
     };
 
-    let preference = if small_body {
-        [Encoding::Gzip, Encoding::Br, Encoding::Deflate]
-    } else {
-        [Encoding::Br, Encoding::Gzip, Encoding::Deflate]
-    };
-    preference.into_iter().find(|encoding| try_pick(*encoding))
+    preference
+        .iter()
+        .copied()
+        .find(|encoding| try_pick(*encoding))
 }
 
 // Handling the Vary HTTP header
@@ -215,25 +224,7 @@ fn negotiate(
     in_memory: bool,
     config: &ResolvedCompressionConfig,
 ) -> (Option<Encoding>, bool) {
-    // Whether this content type is worth trying to compress at all.
-    // Some types are already compressed and don't compress well.
-    if !is_compressible_type(mime) {
-        return (None, false);
-    }
-
-    if res.req_is_head {
-        return (None, false);
-    }
-
-    // RFC specification: don't transform responses that ask not to be transformed.
-    if res.get_header("Cache-Control").is_some_and(is_no_transform) {
-        return (None, false);
-    }
-
-    if res
-        .get_header("Content-Encoding")
-        .is_some_and(|existing| !existing.is_empty() && existing != "identity")
-    {
+    if !is_eligible(res, mime) {
         return (None, false);
     }
 
@@ -244,6 +235,98 @@ fn negotiate(
     let small_body = in_memory && size.is_some_and(|size| size < SMALL_BODY as u64);
     let encoding = pick_encoding(&res.req_accept_encoding, small_body);
     (encoding, true)
+}
+
+// Whether this response can go out compressed at all
+fn is_eligible(res: &CpeakResponse, mime: &str) -> bool {
+    // Whether this content type is worth trying to compress at all.
+    // Some types are already compressed and don't compress well.
+    if !is_compressible_type(mime) {
+        return false;
+    }
+
+    if res.req_is_head {
+        return false;
+    }
+
+    // RFC specification: don't transform responses that ask not to be transformed.
+    if res.get_header("Cache-Control").is_some_and(is_no_transform) {
+        return false;
+    }
+
+    !res.get_header("Content-Encoding")
+        .is_some_and(|existing| !existing.is_empty() && existing != "identity")
+}
+
+// Sends the copy of a file that was compressed ahead of time (see cpeak::precompress), when
+// there is one that the client takes. It goes out exactly as it is on the disk, so nothing
+// gets compressed. False when there is none for this client: the file then goes out the way
+// it always did.
+pub(crate) async fn send_precompressed(
+    res: &mut CpeakResponse,
+    path: &str,
+    mime: &str,
+) -> Result<bool, CpeakError> {
+    if !is_eligible(res, mime) {
+        return Ok(false);
+    }
+
+    let copies = files::precompressed(path);
+    let made: &[Encoding] = match (copies.br, copies.gzip) {
+        (true, true) => &[Encoding::Br, Encoding::Gzip],
+        (true, false) => &[Encoding::Br],
+        (false, true) => &[Encoding::Gzip],
+        (false, false) => return Ok(false),
+    };
+
+    // From here on, what the client gets depends on what it accepts
+    append_vary(res, "Accept-Encoding");
+    let Some(encoding) = pick_from(&res.req_accept_encoding, made) else {
+        return Ok(false);
+    };
+    let copy_path = match encoding {
+        Encoding::Br => format!("{path}.br"),
+        _ => format!("{path}.gz"),
+    };
+
+    // (a copy that just went away is no reason to fail: the file itself is still there)
+    match files::read(&copy_path) {
+        Ok(File::Content(content, _)) => {
+            res.set_header("Content-Type", mime);
+            res.set_header("Content-Encoding", encoding.as_str());
+            res.set_header("Content-Length", content.len());
+            res.end(content)?;
+        }
+        Ok(File::TooBig(size)) => {
+            let Ok(copy) = tokio::fs::File::open(&copy_path).await else {
+                return Ok(false);
+            };
+            res.set_header("Content-Type", mime);
+            res.set_header("Content-Encoding", encoding.as_str());
+            res.set_header("Content-Length", size);
+            pipe(Readable::new(copy), res).await?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+// The strongest compression there is, for the copies that cpeak::precompress() makes. It's
+// far too slow for a response that someone is waiting for, and just right for a build step.
+pub(crate) fn compress_as_small_as_possible(buffer: &[u8], extension: &str) -> io::Result<Vec<u8>> {
+    if extension == "br" {
+        let mut writer = brotli::CompressorWriter::new(Vec::new(), 64 * 1024, 11, 24);
+        writer.write_all(buffer)?;
+        return Ok(writer.into_inner());
+    }
+
+    let mut compressor = libdeflater::Compressor::new(libdeflater::CompressionLvl::best());
+    let mut compressed = vec![0; compressor.gzip_compress_bound(buffer.len())];
+    let written = compressor
+        .gzip_compress(buffer, &mut compressed)
+        .map_err(io::Error::other)?;
+    compressed.truncate(written);
+    Ok(compressed)
 }
 
 // Resolves compression options into a complete config. Called once at Cpeak construction.

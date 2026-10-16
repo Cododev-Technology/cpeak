@@ -468,6 +468,24 @@ server.route("get", "/proxy/feed", async |req, res| {
 
 You must first enable compression at construction time to use `res.compress`.
 
+#### Compressing files ahead of time
+
+Compressing a file takes time and memory, and Cpeak does it again every time the file is requested. For the files of your front end, you can do it once instead, when you build:
+
+```rust
+// A small program of its own, that you run as part of your build
+fn main() {
+    let written = cpeak::precompress("./public").unwrap();
+    println!("{written} compressed copies written");
+}
+```
+
+`precompress` goes through the folder, and next to every file that is worth compressing (`app.js`, `styles.css`, `index.html`...) it writes an `app.js.br` and an `app.js.gz`, as small as brotli and gzip can make them. That takes a second or two for a big file, which is why it belongs in your build and not in a request. When you run it again, it only compresses the files that changed.
+
+From then on, `serve_static` and `res.send_file` send those copies as they are to the clients that accept them. Nothing gets compressed, and the download is smaller than what Cpeak compresses on the fly. Nothing changes in your routes, and it works whether `compression` is enabled or not.
+
+A copy has the modification time of its file, and Cpeak only sends it while that is still the case. So when you change a file and haven't run `precompress` again yet, its old copies are ignored, and the file goes out the way it would without them.
+
 ### Error Handling
 
 If anywhere in your route functions or route middleware functions you want to return an error, you can just return the error and let the automatic error handler catch it:
@@ -711,6 +729,8 @@ server.before_each(serve_static(
 ```
 
 And if there are files or folders in there that shouldn't be served, list them (relative to the folder) in the `exclude` option, like `exclude: vec!["drafts".into()]`.
+
+`serve_static` sends the copies that [`precompress`](#compressing-files-ahead-of-time) made of your files. If you'd rather have it not look for them, pass `precompressed: false`.
 
 #### parse_json
 

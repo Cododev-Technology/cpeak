@@ -164,3 +164,59 @@ pub(crate) fn read(path: impl AsRef<Path>) -> io::Result<File> {
     }
     Ok(File::Content(content, version))
 }
+
+// The copies of a file that were compressed ahead of time, by cpeak::precompress(): app.js.br
+// and app.js.gz, right next to app.js. Sending one of those takes no compressing at all.
+//
+// A copy only counts while it has the very same modification time as its file, which is what
+// precompress() gives it. With any other time it was made from another version of the file
+// (maybe an older one that was put back since), so we leave it alone.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Copies {
+    pub(crate) br: bool,
+    pub(crate) gzip: bool,
+}
+
+// How many files a worker thread remembers that for. When it's full, we start over.
+const MAX_REMEMBERED_COPIES: usize = 10_000;
+
+thread_local! {
+    // Which copies each file has, and when we last looked on the disk
+    static COPIES: RefCell<HashMap<String, (Copies, Instant)>> = RefCell::new(HashMap::new());
+}
+
+// Which copies of the file count right now. Like the files themselves, they're looked for on
+// the disk again when it's been more than CHECK_INTERVAL.
+pub(crate) fn precompressed(path: &str) -> Copies {
+    let recently_checked = COPIES.with(|copies| {
+        copies
+            .borrow()
+            .get(path)
+            .filter(|(_, checked_at)| checked_at.elapsed() < CHECK_INTERVAL)
+            .map(|(copies, _)| *copies)
+    });
+    if let Some(copies) = recently_checked {
+        return copies;
+    }
+
+    let modified = |path: &str| {
+        let metadata = std::fs::metadata(path).ok()?;
+        metadata.modified().ok().filter(|_| metadata.is_file())
+    };
+    let file = modified(path);
+    let counts =
+        |extension: &str| file.is_some() && modified(&format!("{path}.{extension}")) == file;
+    let copies = Copies {
+        br: counts("br"),
+        gzip: counts("gz"),
+    };
+
+    COPIES.with(|remembered| {
+        let mut remembered = remembered.borrow_mut();
+        if remembered.len() >= MAX_REMEMBERED_COPIES {
+            remembered.clear();
+        }
+        remembered.insert(path.to_string(), (copies, Instant::now()));
+    });
+    copies
+}

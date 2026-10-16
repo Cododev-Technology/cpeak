@@ -8,7 +8,7 @@ use crate::internal::uri::{decode_uri_component, normalize_path, resolve_path};
 use crate::types::{Middleware, Next};
 use crate::{CpeakRequest, CpeakResponse};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ServeStaticOptions {
     // Serve the files under a URL prefix, like "/static"
     pub prefix: String,
@@ -16,6 +16,19 @@ pub struct ServeStaticOptions {
     pub live: bool,
     // Files and folders (relative to the served folder) that should not be served
     pub exclude: Vec<String>,
+    // Send the .br or .gz copy of a file when cpeak::precompress() made one. Default: true
+    pub precompressed: bool,
+}
+
+impl Default for ServeStaticOptions {
+    fn default() -> Self {
+        Self {
+            prefix: String::new(),
+            live: false,
+            exclude: Vec::new(),
+            precompressed: true,
+        }
+    }
 }
 
 struct FileRoute {
@@ -40,6 +53,7 @@ pub fn serve_static(
     let options = options.into().unwrap_or_default();
     let prefix = options.prefix;
     let live = options.live;
+    let precompressed = options.precompressed;
 
     let resolved_folder = resolve_path(folder_path);
     let excludes: Vec<PathBuf> = options
@@ -126,7 +140,11 @@ pub fn serve_static(
                     .is_ok_and(|stat| stat.is_file());
                 if is_file {
                     return res
-                        .send_file(&file_path.to_string_lossy(), mime.as_str())
+                        .send_file_or_copy(
+                            &file_path.to_string_lossy(),
+                            Some(mime.as_str()),
+                            precompressed,
+                        )
                         .await;
                 }
 
@@ -135,7 +153,11 @@ pub fn serve_static(
             StaticFiles::Cached { files_map } => {
                 if let Some(file_route) = files_map.get(pathname.as_ref()) {
                     return res
-                        .send_file(&file_route.path, file_route.mime.as_str())
+                        .send_file_or_copy(
+                            &file_route.path,
+                            Some(file_route.mime.as_str()),
+                            precompressed,
+                        )
                         .await;
                 }
 
@@ -145,7 +167,7 @@ pub fn serve_static(
     }
 }
 
-fn process_folder(
+pub(crate) fn process_folder(
     folder_path: &Path,
     parent_folder: &Path,
     excludes: &[PathBuf],
@@ -188,7 +210,7 @@ fn process_folder(
 }
 
 // Like Node.js's path.extname(file).slice(1): "css" for "/styles/main.css", "" for "/.htaccess"
-fn file_extension(file: &str) -> &str {
+pub(crate) fn file_extension(file: &str) -> &str {
     let file_name = file.rsplit(['/', '\\']).next().unwrap_or(file);
     match file_name.rfind('.') {
         Some(0) | None => "",
