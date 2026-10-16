@@ -205,6 +205,8 @@ struct ResponseSlot {
     response: RefCell<Option<Response<ResponseBody>>>,
     // The response was destroyed before its head was sent
     destroyed: Cell<bool>,
+    // hyper let go of the request before it got the head, because the client went away
+    abandoned: Cell<bool>,
     // hyper, waiting for the head
     waiting: RefCell<Option<Waker>>,
     // The handlers are running as part of hyper's own turn right now (see serve()). hyper
@@ -217,6 +219,7 @@ impl ResponseSlot {
         Self {
             response: RefCell::new(None),
             destroyed: Cell::new(false),
+            abandoned: Cell::new(false),
             waiting: RefCell::new(None),
             in_hypers_turn: Cell::new(false),
         }
@@ -228,6 +231,12 @@ impl ResponseSlot {
     }
 
     fn put(&self, response: Response<ResponseBody>) {
+        // Nobody is left to send it. Letting go of it right here is how a streamed body finds
+        // out that the client went away, so res.write() fails instead of waiting forever for
+        // someone to read what it wrote.
+        if self.abandoned.get() {
+            return;
+        }
         *self.response.borrow_mut() = Some(response);
         self.wake();
     }
@@ -1076,7 +1085,7 @@ async fn serve(
     let mut res = CpeakResponse::new(ResponseSender::new(slot.clone()), &req, parts.headers);
     res.compression = worker.compression.clone();
 
-    let mut handling = Handling(Some(Box::pin(async move {
+    let handlers: Pin<Box<dyn Future<Output = ()>>> = Box::pin(async move {
         worker.app.handle_request(&mut req, &mut res).await;
         res.finish();
 
@@ -1090,7 +1099,8 @@ async fn serve(
                 _ => break,
             }
         }
-    })));
+    });
+    let mut handling = Handling(Some(handlers), slot.clone());
 
     // The handlers run right here, as part of the connection (so reading the request body
     // doesn't need any hopping between tasks), until they send the status and headers. If
@@ -1132,7 +1142,7 @@ impl Drop for InHypersTurn<'_> {
 // The handlers of a request while they run as part of the connection. If hyper drops them before
 // they're done (the client went away), they still get to finish in a task of their own, just like
 // a request handler in Node.js runs to the end even when the client is gone.
-struct Handling(Option<Pin<Box<dyn Future<Output = ()>>>>);
+struct Handling(Option<Pin<Box<dyn Future<Output = ()>>>>, Rc<ResponseSlot>);
 
 impl Handling {
     fn detach(&mut self) {
@@ -1144,6 +1154,10 @@ impl Handling {
 
 impl Drop for Handling {
     fn drop(&mut self) {
+        if self.0.is_some() {
+            // Whatever they still send has nowhere to go
+            self.1.abandoned.set(true);
+        }
         // Outside of a running worker (it's shutting down), there's nothing to finish them on
         if self.0.is_some() && !std::thread::panicking() {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.detach()));
