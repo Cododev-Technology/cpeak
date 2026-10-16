@@ -4,6 +4,7 @@ use std::time::UNIX_EPOCH;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
+use crate::internal::crypto::base64url_encode;
 use crate::internal::errors::{framework_error, throw, ErrorCode};
 use crate::internal::uri::{decode_uri_component, encode_uri_component};
 use crate::types::{Middleware, Next, StringMap};
@@ -16,8 +17,8 @@ use crate::{CpeakRequest, CpeakResponse};
 // (e.g., changing the user ID to impersonate another user).
 // However, since it's not encrypted, the actual user ID is still visible to the client.
 // This is a common approach for session cookies where you want to prevent tampering but don't mind if the value is visible.
-fn sign(value: &str, secret: &str) -> String {
-    let sig = base64url_encode(&hmac_sha256(secret, value));
+pub fn sign(value: &str, secret: &str) -> String {
+    let sig = base64url_encode(hmac_sha256(secret, value));
     format!("s:{value}.{sig}")
 }
 
@@ -26,7 +27,7 @@ fn unsign(signed: &str, secret: &str) -> Option<String> {
     let last_dot = without_prefix.rfind('.')?;
     let value = &without_prefix[..last_dot];
     let sig = &without_prefix[last_dot + 1..];
-    let expected = base64url_encode(&hmac_sha256(secret, value));
+    let expected = base64url_encode(hmac_sha256(secret, value));
     let expected_buf = expected.as_bytes();
     let actual_buf = sig.as_bytes();
     if expected_buf.len() != actual_buf.len() {
@@ -232,24 +233,4 @@ fn hmac_sha256(secret: &str, value: &str) -> Vec<u8> {
 // A constant-time comparison, so attackers can't learn anything from how long it takes
 fn timing_safe_equal(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
-}
-
-// The same as Node.js's digest("base64url"): URL-safe base64, without the "=" padding
-fn base64url_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as usize;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
-        encoded.push(ALPHABET[b0 >> 2] as char);
-        encoded.push(ALPHABET[((b0 & 0b11) << 4) | (b1 >> 4)] as char);
-        if chunk.len() > 1 {
-            encoded.push(ALPHABET[((b1 & 0b1111) << 2) | (b2 >> 6)] as char);
-        }
-        if chunk.len() > 2 {
-            encoded.push(ALPHABET[b2 & 0b111111] as char);
-        }
-    }
-    encoded
 }

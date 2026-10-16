@@ -56,6 +56,11 @@ pub use crate::types::{
 // serde_json yourself. from_value() turns a Value (like req.body) into a struct of your own.
 pub use serde_json::{from_value, json, Value};
 
+// What the crypto module is in Node.js: random bytes, a hash, and bytes written as text
+pub mod crypto {
+    pub use crate::internal::crypto::{base64url_encode, hex_encode, random_bytes, sha256};
+}
+
 pub struct CpeakRequest {
     pub method: String,
     // The path and the query string, like /users?filter=active
@@ -905,8 +910,8 @@ impl Drop for RestoreRunning {
 
 // Util functions
 pub use crate::utils::{
-    auth, cookie_parser, cors, hash_password, parse_json, render, serve_static, swagger,
-    verify_password,
+    auth, cookie_parser, cors, hash_password, parse_json, render, serve_static, sign_cookie,
+    swagger, verify_password,
 };
 
 pub use crate::utils::types::{

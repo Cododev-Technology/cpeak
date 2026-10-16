@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 use hmac::{Hmac, Mac};
 use sha2::{Sha256, Sha384, Sha512};
 
+use crate::internal::crypto::{hex_encode, random_bytes};
 use crate::internal::errors::{framework_error, throw, CpeakError, ErrorCode};
 use crate::types::{Middleware, Next};
 use crate::utils::types::{
@@ -39,7 +40,7 @@ pub async fn hash_password(
     let iterations = options.iterations;
     let keylen = options.keylen;
     let digest = options.digest;
-    let salt = random_bytes(options.salt_size)?;
+    let salt = random_bytes(options.salt_size);
     let hash = pbkdf2_async(password, salt.clone(), iterations, keylen, &digest).await?;
     Ok(format!(
         "pbkdf2:{iterations}:{keylen}:{digest}:{}:{}",
@@ -189,7 +190,7 @@ impl CpeakRequest {
         if !is_match {
             return Ok(None);
         }
-        let token_id = hex_encode(&random_bytes(state.token_id_size)?);
+        let token_id = hex_encode(random_bytes(state.token_id_size));
         let token = sign_token(&token_id, &state.secret, &state.hmac_algorithm)?;
         let expires_at = SystemTime::now() + Duration::from_millis(state.token_expiry);
         state
@@ -310,29 +311,12 @@ fn hmac_hex(algorithm: &str, secret: &str, data: &str) -> Result<String, CpeakEr
     Ok(hex_encode(&sig))
 }
 
-fn random_bytes(size: usize) -> Result<Vec<u8>, CpeakError> {
-    let mut bytes = vec![0u8; size];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| CpeakError::other(format!("Failed to generate random bytes: {error}")))?;
-    Ok(bytes)
-}
-
 // A constant-time comparison, so attackers can't learn anything from how long it takes
 fn timing_safe_equal(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
     a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        hex.push(HEX_DIGITS[(byte >> 4) as usize] as char);
-        hex.push(HEX_DIGITS[(byte & 0xf) as usize] as char);
-    }
-    hex
 }
 
 // Like Node.js's Buffer.from(hex, "hex"): decodes the pairs of hex digits up to the first invalid one

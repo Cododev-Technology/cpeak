@@ -2,7 +2,7 @@
 mod common;
 
 use common::{request, serve};
-use cpeak::{cookie_parser, cpeak, CookieOptions, CookieParserOptions, SameSite};
+use cpeak::{cookie_parser, cpeak, sign_cookie, CookieOptions, CookieParserOptions, SameSite};
 use serde_json::json;
 
 const SECRET: &str = "test-secret-cpeak-cookie-signing!!";
@@ -241,6 +241,46 @@ fn should_read_back_a_signed_cookie_and_flag_a_tampered_one() {
         .header("Cookie", "token=s%3Aanother-val.AAAA")
         .send();
     assert_eq!(tampered.json(), json!({ "token": null, "cookies": {} }));
+}
+
+#[test]
+fn should_sign_a_value_the_way_res_cookie_does() {
+    // crypto.createHmac("sha256", secret).update(value).digest("base64url") in Node.js
+    assert_eq!(
+        sign_cookie("abc123", SECRET),
+        "s:abc123.dh3HD4sz_xmtvFcVaDW6pitEipV4gE7_jcQrdcfX7jY"
+    );
+
+    // What res.cookie() sets is the same value, URL-encoded
+    let res = request(server2(), "GET", "/set-cookie").send();
+    let set = res.headers_all("set-cookie")[1].split(';').next().unwrap();
+    assert_eq!(
+        set,
+        format!("token={}", sign_cookie("secret-val", SECRET)).replace(':', "%3A")
+    );
+}
+
+#[test]
+fn should_read_a_cookie_that_was_signed_with_sign_cookie() {
+    let res = request(server2(), "GET", "/read-signed")
+        .header(
+            "Cookie",
+            &format!("token={}", sign_cookie("user-42", SECRET)),
+        )
+        .send();
+    assert_eq!(res.json(), json!({ "token": "user-42", "cookies": {} }));
+
+    // Signed with another secret, it's not one of ours
+    let other = request(server2(), "GET", "/read-signed")
+        .header(
+            "Cookie",
+            &format!(
+                "token={}",
+                sign_cookie("user-42", "another-secret-of-32-characters!!")
+            ),
+        )
+        .send();
+    assert_eq!(other.json(), json!({ "token": null, "cookies": {} }));
 }
 
 #[test]

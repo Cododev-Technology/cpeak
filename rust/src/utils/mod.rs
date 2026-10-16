@@ -8,7 +8,7 @@ pub mod swagger;
 pub mod types;
 
 pub use self::auth::{auth, hash_password, verify_password};
-pub use self::cookie_parser::{cookie_parser, CookieParserOptions};
+pub use self::cookie_parser::{cookie_parser, sign as sign_cookie, CookieParserOptions};
 pub use self::cors::cors;
 pub use self::parse_json::{parse_json, ParseJsonOptions};
 pub use self::render::render;

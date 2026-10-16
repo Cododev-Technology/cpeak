@@ -1,4 +1,5 @@
 pub(crate) mod compression;
+pub(crate) mod crypto;
 pub(crate) mod errors;
 pub(crate) mod files;
 pub(crate) mod json;

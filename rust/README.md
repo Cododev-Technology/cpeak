@@ -40,6 +40,7 @@ Cpeak started as an educational project, and we now run our own products on it. 
   - [Waiting](#waiting)
   - [Listening](#listening)
   - [HTTPS](#https)
+  - [Crypto](#crypto)
   - [Util Functions](#util-functions)
     - [serve_static](#serve_static)
     - [parse_json](#parse_json)
@@ -615,6 +616,27 @@ fn main() {
 
 Under the hood this is [rustls](https://github.com/rustls/rustls), with TLS 1.3 and 1.2.
 
+### Crypto
+
+Node.js comes with the `crypto` module, so a Node.js app installs nothing to make a session token or to hash a value. Cpeak gives your Rust app the parts of it that almost every server needs:
+
+```rust
+use cpeak::crypto::{base64url_encode, hex_encode, random_bytes, sha256};
+
+// crypto.randomBytes(16).toString("hex")
+let session_token = hex_encode(random_bytes(16));
+
+// crypto.randomBytes(7).toString("base64url")
+let code = base64url_encode(random_bytes(7));
+
+// crypto.createHash("sha256").update(text).digest("hex")
+let fingerprint = hex_encode(sha256(format!("{ip}{user_agent}")));
+```
+
+`random_bytes` gets its bytes from the operating system's secure random source, so they are safe to use for tokens and ids. `sha256` takes a string or bytes and gives back the 32 bytes of the hash. `base64url_encode` is the URL-safe base64 without the `=` padding, so the result can go straight into a URL or a cookie.
+
+Don't hash passwords with `sha256`. Use `hash_password` (see [auth](#auth)), which is slow on purpose.
+
 ### Util Functions
 
 There are utility functions that you can include and use as middleware functions. These are meant to make it easier for you to build HTTP applications. In the future, many more will be added, and the ones you don't use are left out of your compiled program. No need to have many dependencies for simple applications!
@@ -832,6 +854,16 @@ The full list of cookie options you can pass as the third argument to `res.cooki
 - `expires` — a specific expiration `SystemTime` for the cookie
 - `path` — path the cookie is valid for (defaults to `"/"`)
 - `domain` — domain the cookie is valid for
+
+To sign a value yourself, use `sign_cookie`. Your tests need it to send a request as a logged-in user without going through your login route:
+
+```rust
+use cpeak::sign_cookie;
+
+let cookie = format!("userId={}", sign_cookie("abc123", "your-secret-key-min-32-chars-long"));
+```
+
+Send that as the `Cookie` header, and `req.signed_cookies` has `userId` in it.
 
 The signed cookies are compatible with the Node.js version of Cpeak, so as long as you use the same secret, both versions can read each other's cookies.
 
