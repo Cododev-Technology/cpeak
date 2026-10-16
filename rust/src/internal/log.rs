@@ -393,15 +393,8 @@ impl ThreadLog {
                 }
                 Part::Method => buffer.extend_from_slice(req.method.as_bytes()),
                 // The URL the request came in with, whatever a middleware function did to req.url
-                Part::Url => match req.uri.path_and_query() {
-                    Some(path_and_query) if req.uri.scheme().is_none() => {
-                        buffer.extend_from_slice(path_and_query.as_str().as_bytes())
-                    }
-                    _ => {
-                        let _ = write!(buffer, "{}", req.uri);
-                    }
-                },
-                Part::Path => buffer.extend_from_slice(req.uri.path().as_bytes()),
+                Part::Url => buffer.extend_from_slice(req.original_url().as_bytes()),
+                Part::Path => buffer.extend_from_slice(url_path(req.original_url()).as_bytes()),
                 Part::Status => {
                     let _ = write!(buffer, "{}", res.status_code);
                 }
@@ -827,4 +820,24 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+// The path of the URL a request came in with, the way hyper's Uri::path() gives it: "/users"
+// for "/users?page=2", and also for a full URL ("http://example.com/users"). "*" is "*", and
+// a CONNECT request ("example.com:443") has no path.
+fn url_path(url: &str) -> &str {
+    let without_query = crate::path_of(url);
+    if without_query.starts_with('/') || without_query == "*" {
+        return without_query;
+    }
+    match without_query.find("://") {
+        Some(at) => {
+            let after_scheme = &without_query[at + 3..];
+            match after_scheme.find('/') {
+                Some(slash) => &after_scheme[slash..],
+                None => "/",
+            }
+        }
+        None => "",
+    }
 }

@@ -58,14 +58,30 @@ pub(crate) fn decode_uri_component(value: &str) -> Option<String> {
 // the last value wins.
 pub(crate) fn parse_search_params(query: &str) -> StringMap {
     let query = query.strip_prefix('?').unwrap_or(query);
-    let mut params = StringMap::new();
+    if query.is_empty() {
+        return StringMap::new();
+    }
+    // Room for every pair up front, so the map never has to grow
+    let pairs = query.bytes().filter(|&byte| byte == b'&').count() + 1;
+    let mut params = StringMap::with_capacity(pairs);
 
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
+    let mut rest = query;
+    loop {
+        let (pair, next) = match rest.bytes().position(|byte| byte == b'&') {
+            Some(at) => (&rest[..at], Some(&rest[at + 1..])),
+            None => (rest, None),
+        };
+        if !pair.is_empty() {
+            let (name, value) = match pair.bytes().position(|byte| byte == b'=') {
+                Some(at) => (&pair[..at], &pair[at + 1..]),
+                None => (pair, ""),
+            };
+            params.insert(form_decode(name), form_decode(value));
         }
-        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-        params.insert(form_decode(name), form_decode(value));
+        match next {
+            Some(next) => rest = next,
+            None => break,
+        }
     }
 
     params
@@ -75,6 +91,10 @@ pub(crate) fn parse_search_params(query: &str) -> StringMap {
 // percent-encoding is left as it is instead of failing.
 fn form_decode(value: &str) -> String {
     let bytes = value.as_bytes();
+    // Most names and values have nothing to decode
+    if !bytes.iter().any(|&byte| byte == b'+' || byte == b'%') {
+        return value.to_owned();
+    }
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
@@ -94,7 +114,10 @@ fn form_decode(value: &str) -> String {
         }
         i += 1;
     }
-    String::from_utf8_lossy(&decoded).into_owned()
+    match String::from_utf8(decoded) {
+        Ok(decoded) => decoded,
+        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+    }
 }
 
 fn hex_value(byte: u8) -> Option<u8> {

@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use hyper::body::{Frame, Incoming, SizeHint};
-use hyper::header::HeaderMap;
+use hyper::header::{self, HeaderMap};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
@@ -924,7 +924,11 @@ where
     let service = {
         let worker = worker.clone();
         service_fn(move |request: Request<Incoming>| {
-            serve(worker.clone(), slot.clone(), request, remote_address)
+            // We copy what the handlers need out of hyper's request right away. If anything
+            // still points into hyper's read buffer when it reads the next request, hyper has
+            // to allocate a new buffer.
+            let handlers = start_request(&worker, &slot, request, remote_address);
+            serve(handlers, slot.clone())
         })
     };
     let connection = http1::Builder::new()
@@ -1092,33 +1096,39 @@ impl<T: hyper::rt::Write + Unpin> hyper::rt::Write for HoldingBack<T> {
     }
 }
 
-// Handles one request. Cpeak runs your middleware and handlers right here, and as soon as they
-// send the status and headers, we hand the response over to hyper. If they stream the body (or
-// just take a while), they keep going in their own task while hyper sends what they write.
-async fn serve(
-    worker: Rc<Worker>,
-    slot: Rc<ResponseSlot>,
+// Sets a request up: its req and res, and the handlers that run for it
+fn start_request(
+    worker: &Rc<Worker>,
+    slot: &Rc<ResponseSlot>,
     request: Request<Incoming>,
     remote_address: SocketAddr,
-) -> io::Result<Response<ResponseBody>> {
+) -> Pin<Box<dyn Future<Output = ()>>> {
     slot.reset();
 
     let (mut parts, incoming) = request.into_parts();
+    // req.headers, and its Accept-Encoding for res.compression
+    let (headers, accept_encoding) = incoming_headers(&parts.headers);
     let mut req = CpeakRequest::new(
         parts.method.as_str().to_string(),
-        parts.uri,
-        incoming_headers(&parts.headers),
+        request_url(&parts.uri),
+        headers,
         remote_address,
         incoming,
     );
     // The request's header map becomes the response's (emptied). hyper hands it back to us
     // with the next request once it has sent the response, so a connection never allocates another one.
     parts.headers.clear();
-    let mut res = CpeakResponse::new(ResponseSender::new(slot.clone()), &req, parts.headers);
+    let mut res = CpeakResponse::new(
+        ResponseSender::new(slot.clone()),
+        &req,
+        parts.headers,
+        accept_encoding,
+    );
     res.compression = worker.compression.clone();
     let started = worker.log_requests.then(Instant::now);
+    let worker = worker.clone();
 
-    let handlers: Pin<Box<dyn Future<Output = ()>>> = Box::pin(async move {
+    Box::pin(async move {
         worker.app.handle_request(&mut req, &mut res).await;
         res.finish();
         if let (Some(started), Some(request_log)) = (started, res.request_log) {
@@ -1135,7 +1145,16 @@ async fn serve(
                 _ => break,
             }
         }
-    });
+    })
+}
+
+// Handles one request. Cpeak runs your middleware and handlers right here, and as soon as they
+// send the status and headers, we hand the response over to hyper. If they stream the body (or
+// just take a while), they keep going in their own task while hyper sends what they write.
+async fn serve(
+    handlers: Pin<Box<dyn Future<Output = ()>>>,
+    slot: Rc<ResponseSlot>,
+) -> io::Result<Response<ResponseBody>> {
     let mut handling = Handling(Some(handlers), slot.clone());
 
     // The handlers run right here, as part of the connection (so reading the request body
@@ -1204,8 +1223,23 @@ impl Drop for Handling {
 // Build req.headers the way Node.js does: lower-cased names, and when a header is sent more
 // than once, the values are joined together (with "; " for cookie and ", " for the rest).
 // Duplicates of the headers below are discarded, just like Node.js does.
-fn incoming_headers(headers: &HeaderMap) -> StringMap {
+//
+// Also gives back the Accept-Encoding header on its own, for res.compression.
+fn incoming_headers(headers: &HeaderMap) -> (StringMap, String) {
     let mut result = StringMap::with_capacity(headers.keys_len());
+
+    // Usually every header comes once: nothing to join or discard
+    if headers.len() == headers.keys_len() {
+        let mut accept_encoding = String::new();
+        for (name, value) in headers {
+            let value = latin1_string(value.as_bytes());
+            if name == header::ACCEPT_ENCODING {
+                accept_encoding = value.clone();
+            }
+            result.insert(name.as_str().to_owned(), value);
+        }
+        return (result, accept_encoding);
+    }
 
     for (name, value) in headers {
         let name = name.as_str();
@@ -1248,7 +1282,16 @@ fn incoming_headers(headers: &HeaderMap) -> StringMap {
         }
     }
 
-    result
+    let accept_encoding = result.get("accept-encoding").cloned().unwrap_or_default();
+    (result, accept_encoding)
+}
+
+// req.url: the path and the query string, as the client sent them (like /users?filter=active)
+fn request_url(uri: &hyper::Uri) -> String {
+    match uri.path_and_query() {
+        Some(path_and_query) if uri.scheme().is_none() => path_and_query.as_str().to_owned(),
+        _ => uri.to_string(),
+    }
 }
 
 // Header values are Latin-1 (ISO-8859-1) strings

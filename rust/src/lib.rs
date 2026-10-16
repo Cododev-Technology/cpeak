@@ -23,7 +23,7 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use hyper::body::Incoming;
 use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
-use hyper::{StatusCode, Uri};
+use hyper::StatusCode;
 use serde::Serialize;
 
 use crate::internal::compression::{
@@ -86,9 +86,9 @@ pub struct CpeakRequest {
     pub signed_cookies: HashMap<String, Option<String>>,
 
     incoming: Option<Incoming>,
-    // The URL as hyper parsed it. We route on this one, like the Node.js version routes on
-    // the URL the request came in with, whatever a middleware function does to req.url.
-    uri: Uri,
+    // req.url as the request came in with it, kept aside while there is middleware that could
+    // change req.url. We route on this one, like the Node.js version does.
+    pub(crate) original_url: Option<String>,
     // Set by the auth() middleware
     pub(crate) auth: Option<&'static AuthState>,
     // Allow developers to add their own extensions (e.g. req.set("test", ...))
@@ -98,20 +98,20 @@ pub struct CpeakRequest {
 impl CpeakRequest {
     pub(crate) fn new(
         method: String,
-        uri: Uri,
+        url: String,
         headers: StringMap,
         remote_address: SocketAddr,
         incoming: Incoming,
     ) -> Self {
         // Parse the URL parameters (like /users?key1=value1&key2=value2)
-        let query = match uri.query() {
-            Some(query) => parse_search_params(query),
+        let query = match url.bytes().position(|byte| byte == b'?') {
+            Some(at) => parse_search_params(&url[at + 1..]),
             None => StringMap::new(),
         };
 
         Self {
             method,
-            url: request_url(&uri),
+            url,
             headers,
             remote_address,
             body: serde_json::Value::Null,
@@ -120,7 +120,7 @@ impl CpeakRequest {
             cookies: StringMap::new(),
             signed_cookies: HashMap::new(),
             incoming: Some(incoming),
-            uri,
+            original_url: None,
             auth: None,
             extensions: HashMap::new(),
         }
@@ -174,13 +174,18 @@ impl CpeakRequest {
             }
         }
     }
+
+    // req.url as the request came in with it
+    pub(crate) fn original_url(&self) -> &str {
+        self.original_url.as_deref().unwrap_or(&self.url)
+    }
 }
 
-// The path and the query string, as the client sent them (like /users?filter=active)
-fn request_url(uri: &Uri) -> String {
-    match uri.path_and_query() {
-        Some(path_and_query) if uri.scheme().is_none() => path_and_query.as_str().to_owned(),
-        _ => uri.to_string(),
+// A URL without its query string
+pub(crate) fn path_of(url: &str) -> &str {
+    match url.bytes().position(|byte| byte == b'?') {
+        Some(at) => &url[..at],
+        None => url,
     }
 }
 
@@ -210,7 +215,12 @@ pub struct CpeakResponse {
 
 impl CpeakResponse {
     // `headers` is an empty map to fill in (the server reuses the one of the request, see server.rs)
-    pub(crate) fn new(sender: ResponseSender, req: &CpeakRequest, headers: HeaderMap) -> Self {
+    pub(crate) fn new(
+        sender: ResponseSender,
+        req: &CpeakRequest,
+        headers: HeaderMap,
+        accept_encoding: String,
+    ) -> Self {
         Self {
             status_code: 200,
             headers,
@@ -221,11 +231,7 @@ impl CpeakResponse {
             body_bytes: 0,
             compression: None,
             req_is_head: req.method == "HEAD",
-            req_accept_encoding: req
-                .headers
-                .get("accept-encoding")
-                .cloned()
-                .unwrap_or_default(),
+            req_accept_encoding: accept_encoding,
             render_enabled: false,
             cookie_secret: None,
             request_log: None,
@@ -602,11 +608,15 @@ fn header_pair(name: &str, value: impl Display) -> (HeaderName, HeaderValue) {
             Err(_) => &mut own_buffer,
         };
         formatted.clear();
-        let _ = write!(formatted, "{value}");
-
-        // The values that Cpeak itself sets all the time don't need to be copied
-        if let Some(value) = static_header_value(formatted) {
-            return Some(value);
+        // The values that Cpeak itself sets all the time aren't copied (see HeaderText)
+        let mut text = HeaderText {
+            formatted: &mut *formatted,
+            known: None,
+            pieces: 0,
+        };
+        let _ = write!(text, "{value}");
+        if let (1, Some(known)) = (text.pieces, text.known.take()) {
+            return Some(known);
         }
         if formatted.is_ascii() {
             return HeaderValue::from_str(formatted).ok();
@@ -622,6 +632,31 @@ fn header_pair(name: &str, value: impl Display) -> (HeaderName, HeaderValue) {
         header_value.unwrap_or_else(|| panic!("Invalid character in header content [\"{name}\"]"));
 
     (header_name, header_value)
+}
+
+// Where a header value is written to. A value that Cpeak itself sets all the time (see
+// static_header_value) isn't copied.
+struct HeaderText<'a> {
+    formatted: &'a mut String,
+    known: Option<HeaderValue>,
+    pieces: u32,
+}
+
+impl std::fmt::Write for HeaderText<'_> {
+    fn write_str(&mut self, piece: &str) -> std::fmt::Result {
+        self.pieces += 1;
+        if self.pieces == 1 {
+            if let Some(known) = static_header_value(piece) {
+                self.known = Some(known);
+                return Ok(());
+            }
+        } else if let Some(known) = self.known.take() {
+            // More than one piece after all: the first one goes in the text too
+            self.formatted.push_str(known.to_str().unwrap_or_default());
+        }
+        self.formatted.push_str(piece);
+        Ok(())
+    }
 }
 
 // The header names that are set all the time, the way they're usually written. These don't
@@ -642,22 +677,26 @@ fn static_header_name(name: &str) -> Option<HeaderName> {
 
 // The header values that Cpeak sets itself (content types, Vary, CORS, compression...)
 fn static_header_value(value: &str) -> Option<HeaderValue> {
-    let value = match value {
-        "application/json" => "application/json",
-        "text/plain" => "text/plain",
-        "text/html" => "text/html",
-        "text/css" => "text/css",
-        "application/javascript" => "application/javascript",
-        "close" => "close",
-        "true" => "true",
-        "Origin" => "Origin",
-        "Accept-Encoding" => "Accept-Encoding",
-        "gzip" => "gzip",
-        "br" => "br",
-        "deflate" => "deflate",
+    // By length first, so a value is compared with one of these at most
+    let known: &'static str = match value.len() {
+        2 => "br",
+        4 if value.as_bytes()[0] == b't' => "true",
+        4 => "gzip",
+        5 => "close",
+        6 => "Origin",
+        7 => "deflate",
+        8 => "text/css",
+        9 => "text/html",
+        10 => "text/plain",
+        15 => "Accept-Encoding",
+        16 => "application/json",
+        22 => "application/javascript",
         _ => return None,
     };
-    Some(HeaderValue::from_static(value))
+    if value != known {
+        return None;
+    }
+    Some(HeaderValue::from_static(known))
 }
 
 pub struct Cpeak {
@@ -711,22 +750,12 @@ impl Cpeak {
     // Every request starts here (the server has already set res.compression, from its own copy
     // of this Cpeak's option)
     pub(crate) async fn handle_request(&self, req: &mut CpeakRequest, res: &mut CpeakResponse) {
-        // Get the url without the URL parameters (query strings). Cloning the Uri doesn't copy
-        // its text (it's counted), so we get to keep the path while the middleware has req.
-        let uri = req.uri.clone();
-        match uri.path_and_query() {
-            Some(path_and_query) if uri.scheme().is_none() => {
-                self.run_middleware(req, res, path_and_query.path()).await
-            }
-            // A full URL as the request target (like "GET http://example.com/users"). Rare.
-            _ => {
-                let url_without_queries = match req.url.find('?') {
-                    Some(q_index) => req.url[..q_index].to_string(),
-                    None => req.url.clone(),
-                };
-                self.run_middleware(req, res, &url_without_queries).await
-            }
+        // We route on the URL the request came in with, whatever a middleware function does
+        // to req.url. With no middleware, nothing can change it before we get to the router.
+        if !self.middleware.is_empty() {
+            req.original_url = Some(req.url.clone());
         }
+        self.run_middleware(req, res).await
     }
 
     // Run all the specific middleware functions for that router only and then run the handler
@@ -738,6 +767,12 @@ impl Cpeak {
         cb: &dyn DynHandler,
         next_called: &NextCalled,
     ) {
+        // A cpeak::log_requests() on this route logs the URL the request came in with, even
+        // if the handler changes req.url
+        if !middleware.is_empty() && req.original_url.is_none() {
+            req.original_url = Some(req.url.clone());
+        }
+
         for route_middleware in middleware {
             // Handle the errors by passing them to handleErr to save developers from having to manually handle every error in every route middleware.
             if let Err(error) =
@@ -760,12 +795,7 @@ impl Cpeak {
     }
 
     // Run all the middleware functions (before_each functions) before we run the corresponding route
-    async fn run_middleware(
-        &self,
-        req: &mut CpeakRequest,
-        res: &mut CpeakResponse,
-        url_without_queries: &str,
-    ) {
+    async fn run_middleware(&self, req: &mut CpeakRequest, res: &mut CpeakResponse) {
         let next_called = NextCalled::default();
 
         for middleware in &self.middleware {
@@ -782,7 +812,8 @@ impl Cpeak {
 
         // Our exit point...
         // (the router matches the method without caring about its case, so no need to lower-case it)
-        if let Some(found) = self.router.find(&req.method, url_without_queries) {
+        let found = self.router.find(&req.method, path_of(req.original_url()));
+        if let Some(found) = found {
             req.params = found.params;
             return self
                 .run_handler(req, res, found.middleware, found.handler, &next_called)
@@ -799,7 +830,7 @@ impl Cpeak {
 
         // If the requested route does not exist, and developer has not registered the fallback handler, return 404
         let _ = res.status(404).json(serde_json::json!({
-            "error": format!("Cannot {} {}", req.method, url_without_queries)
+            "error": format!("Cannot {} {}", req.method, path_of(req.original_url()))
         }));
     }
 

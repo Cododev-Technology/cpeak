@@ -253,8 +253,9 @@ fn match_segments<'a, 'p>(
         return None;
     };
 
-    let (segment, rest) = match segments.split_once('/') {
-        Some((segment, rest)) => (segment, Some(rest)),
+    // '/' is one byte, so we look for it byte by byte (quicker than split_once for short paths)
+    let (segment, rest) = match segments.bytes().position(|byte| byte == b'/') {
+        Some(at) => (&segments[..at], Some(&segments[at + 1..])),
         None => (segments, None),
     };
 

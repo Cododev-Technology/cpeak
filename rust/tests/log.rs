@@ -340,6 +340,35 @@ fn on_a_route_of_its_own() {
 }
 
 #[test]
+fn the_url_the_request_came_in_with() {
+    let folder = folder("original-url");
+    let port = start(|| {
+        let mut server = Cpeak::new(CpeakOptions {
+            log: Some(LogOptions {
+                output: file(&folder, "info.log"),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let log_requests = cpeak::log_requests(RequestLogOptions {
+            format: "{url} {path}".to_string(),
+            ..Default::default()
+        });
+        server.route_with("get", "/logged", log_requests, async |req, res| {
+            req.url = "/changed?by=handler".to_string();
+            res.end("")
+        });
+        server
+    });
+
+    request(port, "GET", "/logged?page=2").send();
+    assert_eq!(
+        lines(folder.join("info.log"), 1),
+        ["/logged?page=2 /logged"]
+    );
+}
+
+#[test]
 fn one_line_for_a_request_that_goes_through_it_twice() {
     let folder = folder("twice");
     let port = start(|| {
