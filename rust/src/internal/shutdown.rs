@@ -112,6 +112,9 @@ async fn shut_down() {
         clean_up().await;
     }
 
+    // Everything that was logged is written before the program exits
+    crate::internal::log::written().await;
+
     std::process::exit(0);
 }
 

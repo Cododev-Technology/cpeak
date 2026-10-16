@@ -37,6 +37,7 @@ Cpeak started as an educational project, and we now run our own products on it. 
   - [MIME Types](#mime-types)
   - [Compression](#compression)
   - [Error Handling](#error-handling)
+  - [Logging](#logging)
   - [Waiting](#waiting)
   - [Running in the Background](#running-in-the-background)
   - [Running on the Same Thread](#running-on-the-same-thread)
@@ -545,6 +546,132 @@ server.route("get", "/avatars/:id", async |req, res| {
     Ok(())
 });
 ```
+
+### Logging
+
+`cpeak::log()` writes a line of your own, and the `cpeak::log_requests()` middleware writes a line for every request:
+
+```rust
+use cpeak::{cpeak, json, RequestLogOptions};
+
+fn main() {
+    let mut server = cpeak();
+
+    server.before_each(cpeak::log_requests(RequestLogOptions::default()));
+
+    server.route("get", "/", async |_req, res| {
+        cpeak::log("Someone said hi");
+        return res.json(json!({ "message": "Hi there!" }));
+    });
+
+    server
+        .listen(3000, || {
+            cpeak::log("Server has started on port 3000");
+        })
+        .wait();
+}
+```
+
+The lines go to stdout and look like this:
+
+```
+2026-10-15 14:00:00 -- Server has started on port 3000
+2026-10-15 14:00:02 -- Someone said hi
+2026-10-15 14:00:02 -- 127.0.0.1 -- GET / 200 OK -- 0.21 ms
+```
+
+Like any middleware, where you put `cpeak::log_requests()` decides which requests get a line. The ones that end before they reach it don't, so to leave out the files that `serve_static()` sends, put it after that:
+
+```rust
+server.before_each(serve_static("./public", None)); // these never reach the log
+server.before_each(cpeak::log_requests(RequestLogOptions::default()));
+```
+
+Or put it in front of everything to log them all. It also works on a single route, with `server.route_with("get", "/api/orders", cpeak::log_requests(...), handler)`. The time in a line is from when the request came in, not from when it reached `cpeak::log_requests()`.
+
+To log an error, pass it to `cpeak::log()`. It goes to the log of errors (stderr by default), with everything the error knows. Your `handle_err` is a good place for it:
+
+```rust
+server.handle_err(async |error, req, res| {
+    if let Some(status) = error.status {
+        return res.status(status).json(json!({ "error": error.message }));
+    }
+    cpeak::log(&error);
+    return res.status(500).json(json!({
+        "error": "Sorry, something unexpected happened on our side."
+    }));
+});
+```
+
+Where the lines go is up to the `log` option of your app. Here it is with everything in it, and what each one is when you leave it out:
+
+```rust
+use std::time::Duration;
+use cpeak::{LogOptions, LogOutput, LogTimeZone};
+
+let mut server = Cpeak::new(CpeakOptions {
+    log: Some(LogOptions {
+        // Where cpeak::log("...") and the request lines go. Default: LogOutput::Stdout
+        // A {day} in the path starts a new file every day, and the folders are made for you.
+        output: LogOutput::File("logs/{day}/info.log".to_string()),
+        // Where cpeak::log(&error) goes. Default: LogOutput::Stderr
+        errors: LogOutput::File("logs/{day}/errors.log".to_string()),
+
+        // The clock of the dates (and of when a {day} file starts). Default: LogTimeZone::Utc
+        time_zone: LogTimeZone::Local,
+
+        // Each worker thread collects its lines and hands them over to be written once it
+        // has this many bytes, or this much time has passed. Defaults: 64KB and 100ms
+        buffer_size: 64 * 1024,
+        flush_every: Duration::from_millis(100),
+    }),
+    ..Default::default()
+});
+```
+
+And these are the options of `cpeak::log_requests()`:
+
+```rust
+use std::time::Duration;
+use cpeak::RequestLogOptions;
+
+server.before_each(cpeak::log_requests(RequestLogOptions {
+    format: "{date} -- {ip} -- {method} {url} {status} {status_message} -- {ms} ms".to_string(),
+    // Behind a proxy or a load balancer, read the IP of the client from this header
+    // (when it has a value). Default: None, the address of the connection
+    ip_header: Some("x-forwarded-for".to_string()),
+
+    // Which requests get a line. Default: all of them. With more than one of
+    // these set, a request has to pass every one.
+    only_errors: false,                              // only a status of 400 and above
+    slower_than: Some(Duration::from_millis(500)),   // only the slow ones
+    sample: Some(100),                               // only 1 in 100
+    skip: Some(|req, _res| req.url == "/health"),    // your own rule
+}));
+```
+
+These are the names you can use in `format`:
+
+| Name | What it writes |
+| --- | --- |
+| `{date}` | `2026-10-15 14:00:00` |
+| `{iso}` | `2026-10-15T14:00:00.123Z` (or `-04:00` instead of the `Z` with `LogTimeZone::Local`) |
+| `{ip}` | the IP of the client |
+| `{method}` | `GET` |
+| `{url}` | the URL the request came in with, like `/users?filter=active` |
+| `{path}` | the URL without the query string |
+| `{status}` | `302` |
+| `{status_message}` | `Found` |
+| `{ms}` | how long the request took, in milliseconds (`0.21`) |
+| `{us}` | how long the request took, in microseconds (`210`) |
+| `{bytes}` | the size of the body that was sent |
+| `{header:NAME}` | any request header, like `{header:user-agent}` (`-` when it's missing) |
+
+A name that isn't on the list panics when `cpeak::log_requests()` is called, so a typo shows up right away.
+
+The log is made to keep up with a busy server. Each worker thread writes its lines into a buffer of its own, and one thread of its own does the writing, so a request never waits for the disk. If the disk can't keep up, the lines that don't fit in line are dropped instead of piling up in memory, and the log says how many once it catches up. An error is written right away, and never dropped. When the server stops, everything left in the buffers is written first.
+
+`cpeak::log()` works anywhere. Outside a route (at startup, in a script, on a thread of your own), the line is written before it returns. It goes where the `log` option of your app says, and when no app has the option, the text goes to stdout and the errors to stderr.
 
 ### Waiting
 

@@ -36,6 +36,7 @@ use socket2::{Domain, Socket, Type};
 use tokio::sync::{mpsc, watch};
 
 use crate::internal::event_loop;
+use crate::internal::log;
 use crate::internal::shutdown;
 use crate::internal::socket;
 use crate::internal::timers;
@@ -555,6 +556,8 @@ impl IntoFuture for CpeakServer {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             self.stopped().await;
+            // What the workers logged on their way out
+            log::written().await;
 
             // The program was asked to stop (SIGTERM). It exits by itself once the functions
             // passed to cpeak::on_shutdown() are done, and until then whoever waits for the
@@ -715,6 +718,8 @@ struct Worker {
     app: Arc<Cpeak>,
     // res.compression, one copy per worker, so the requests don't all bump the same counter
     compression: Option<Rc<ResolvedCompressionConfig>>,
+    // There is a cpeak::log_requests(), so the requests need the time they came in
+    log_requests: bool,
     closing: Cell<bool>,
     // The connections to wake up once the server starts closing (by connection id)
     connections: RefCell<Vec<Option<Waker>>>,
@@ -727,9 +732,11 @@ impl Worker {
             .compression
             .as_ref()
             .map(|config| Rc::new(config.clone()));
+        let log_requests = log::logs_requests();
         Self {
             app,
             compression,
+            log_requests,
             closing: Cell::new(false),
             connections: RefCell::new(Vec::new()),
             free_ids: RefCell::new(Vec::new()),
@@ -791,6 +798,11 @@ fn run_worker(app: Arc<Cpeak>, connections: Connections) {
     // For cpeak::sleep()
     timers::start(&runtime);
     keep_timer_driver_set(&runtime);
+    // For cpeak::log() and the request lines
+    if app.log.is_some() || log::logs_requests() {
+        let logger = app.log.clone().unwrap_or_else(log::default_logger);
+        log::start_worker(&runtime, logger);
+    }
     let local = tokio::task::LocalSet::new();
 
     local.spawn_local(async move {
@@ -825,6 +837,7 @@ fn run_worker(app: Arc<Cpeak>, connections: Connections) {
 
     // Runs until every task is done: the connections, and their requests
     runtime.block_on(local);
+    log::stop_worker();
 }
 
 // The timer hyper uses for the 30 seconds it gives a client to send the headers of a request.
@@ -1103,10 +1116,14 @@ async fn serve(
     parts.headers.clear();
     let mut res = CpeakResponse::new(ResponseSender::new(slot.clone()), &req, parts.headers);
     res.compression = worker.compression.clone();
+    let started = worker.log_requests.then(Instant::now);
 
     let handlers: Pin<Box<dyn Future<Output = ()>>> = Box::pin(async move {
         worker.app.handle_request(&mut req, &mut res).await;
         res.finish();
+        if let (Some(started), Some(request_log)) = (started, res.request_log) {
+            log::request(&req, &res, started, request_log);
+        }
 
         // Like Node.js does once the response is finished, read and throw away whatever is left
         // of the request body (if your handlers didn't read it), so the connection can be reused

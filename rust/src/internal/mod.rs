@@ -4,6 +4,7 @@ pub(crate) mod errors;
 pub(crate) mod event_loop;
 pub(crate) mod files;
 pub(crate) mod json;
+pub(crate) mod log;
 pub(crate) mod mime_types;
 pub(crate) mod router;
 pub(crate) mod server;

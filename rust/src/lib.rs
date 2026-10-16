@@ -20,6 +20,7 @@ use std::net::SocketAddr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -35,6 +36,7 @@ use crate::internal::compression::{
 use crate::internal::errors::CatchUnwind;
 use crate::internal::files::{self, File};
 use crate::internal::json;
+use crate::internal::log::{Logger, RequestLog};
 use crate::internal::mime_types::{get_mime, register_mime_types};
 use crate::internal::router::Router;
 use crate::internal::server::{ResponseBody, ResponseSender};
@@ -47,10 +49,14 @@ use crate::utils::auth::AuthState;
 pub use crate::internal::compression::{Body, Readable};
 pub use crate::internal::errors::{framework_error, is_client_disconnect, CpeakError, ErrorCode};
 pub use crate::internal::event_loop::{run, spawn, spawn_blocking, spawn_local};
+pub use crate::internal::log::{log, log_requests, LogMessage};
 pub use crate::internal::server::{CpeakServer, ListenAddress};
 pub use crate::internal::shutdown::on_shutdown;
 pub use crate::internal::timers::sleep;
-pub use crate::internal::types::{BrotliOptions, CompressionOptions, HttpsOptions, ZlibOptions};
+pub use crate::internal::types::{
+    BrotliOptions, CompressionOptions, HttpsOptions, LogOptions, LogOutput, LogTimeZone,
+    RequestLogOptions, ZlibOptions,
+};
 pub use crate::types::{
     CpeakOptions, ErrorHandler, Handler, IntoRouteMiddleware, Middleware, Next, RouteMiddleware,
     StringMap,
@@ -189,6 +195,8 @@ pub struct CpeakResponse {
     sender: ResponseSender,
     // The functions to run once the response is sent (res.on_finish())
     finish_listeners: Vec<Box<dyn FnOnce(&FinishedResponse)>>,
+    // How many bytes of body went out, for the {bytes} of the request log
+    pub(crate) body_bytes: u64,
 
     // Set per-request from the Cpeak instance (the worker's own copy of it). None when compression isn't enabled.
     pub(crate) compression: Option<Rc<ResolvedCompressionConfig>>,
@@ -199,6 +207,8 @@ pub struct CpeakResponse {
     pub(crate) render_enabled: bool,
     // Set by the cookie_parser() middleware
     pub(crate) cookie_secret: Option<&'static str>,
+    // Set by the cpeak::log_requests() middleware
+    pub(crate) request_log: Option<&'static RequestLog>,
 }
 
 impl CpeakResponse {
@@ -211,6 +221,7 @@ impl CpeakResponse {
             finished: false,
             sender,
             finish_listeners: Vec::new(),
+            body_bytes: 0,
             compression: None,
             req_is_head: req.method == "HEAD",
             req_accept_encoding: req
@@ -220,6 +231,7 @@ impl CpeakResponse {
                 .unwrap_or_default(),
             render_enabled: false,
             cookie_secret: None,
+            request_log: None,
         }
     }
 
@@ -477,6 +489,7 @@ impl CpeakResponse {
         if chunk.is_empty() {
             return Ok(());
         }
+        self.body_bytes += chunk.len() as u64;
         self.sender.send_chunk(chunk).await.map_err(|()| {
             let mut error = CpeakError::other("The client closed the connection");
             error.client_disconnect = true;
@@ -493,6 +506,9 @@ impl CpeakResponse {
         let data = data.into();
         self.finished = true;
         self.headers_sent = true;
+        if !self.req_is_head {
+            self.body_bytes += data.len() as u64;
+        }
 
         if self.sender.is_streaming() {
             self.sender.close(Ok(data));
@@ -656,6 +672,8 @@ pub struct Cpeak {
     pub(crate) compression: Option<ResolvedCompressionConfig>,
     // Set when the app is served over HTTPS
     pub(crate) https: Option<ResolvedHttpsConfig>,
+    // Set when the app has a `log` option
+    pub(crate) log: Option<Arc<Logger>>,
 }
 
 impl Cpeak {
@@ -679,6 +697,9 @@ impl Cpeak {
         // Read the key and the certificate once at app startup.
         let https = options.https.map(resolve_https_options);
 
+        // Where the lines of the log go, once at app startup.
+        let log = options.log.map(internal::log::start);
+
         Self {
             router: Router::new(),
             middleware: Vec::new(),
@@ -686,6 +707,7 @@ impl Cpeak {
             fallback: None,
             compression,
             https,
+            log,
         }
     }
 

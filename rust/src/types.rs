@@ -3,7 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::internal::errors::CpeakError;
-use crate::internal::types::{CompressionOptions, HttpsOptions};
+use crate::internal::types::{CompressionOptions, HttpsOptions, LogOptions};
 use crate::{CpeakRequest, CpeakResponse};
 
 // For constructor options passed to `Cpeak::new()`
@@ -15,6 +15,8 @@ pub struct CpeakOptions {
     pub https: Option<HttpsOptions>,
     // How many threads cpeak::spawn() runs things on (4 if you leave it out)
     pub background_threads: Option<usize>,
+    // Where cpeak::log() and cpeak::log_requests() write
+    pub log: Option<LogOptions>,
 }
 
 pub type StringMap = HashMap<String, String>;
