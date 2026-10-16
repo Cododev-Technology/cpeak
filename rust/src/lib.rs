@@ -1,6 +1,3 @@
-//! Cpeak is a minimal and fast Rust framework inspired by Express.js & Fastify.
-//! It's the Rust port of the Cpeak Node.js framework: https://github.com/Cododev-Technology/cpeak/tree/main/node
-
 mod internal;
 mod types;
 pub mod utils;
