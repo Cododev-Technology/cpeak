@@ -1,6 +1,6 @@
 [package]
 name = "cpeak"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 description = "A minimal and incredibly fast Rust HTTP framework. The Rust port of the Cpeak Node.js framework."
