@@ -1,7 +1,7 @@
 import { IncomingMessage, ServerResponse, type Server } from "node:http";
 import type { Readable } from "node:stream";
 import type { Buffer } from "node:buffer";
-import type { CompressionOptions } from "./internal/types";
+import type { CompressionOptions, LogOptions } from "./internal/types";
 import type { CookieOptions } from "./utils/types";
 import type { CpeakIncomingMessage, CpeakServerResponse } from "./index";
 
@@ -16,6 +16,8 @@ export type CpeakHttpServer = Server<
 export interface CpeakOptions {
   compression?: boolean | CompressionOptions;
   mimeTypes?: StringMap;
+  // Where log() and log.requests() write
+  log?: LogOptions;
 }
 
 // Extending Node.js's Request and Response objects to add our custom properties

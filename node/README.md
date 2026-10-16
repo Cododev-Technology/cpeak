@@ -37,6 +37,7 @@ Cpeak started as an educational project, and now it's being used for production.
   - [MIME Types](#mime-types)
   - [Compression](#compression)
   - [Error Handling](#error-handling)
+  - [Logging](#logging)
   - [Listening](#listening)
   - [Util Functions](#util-functions)
     - [serveStatic](#servestatic)
@@ -409,6 +410,123 @@ server.route("get", "/avatars/:id", async (req, res) => {
   await res.sendFile(path);
 });
 ```
+
+### Logging
+
+`log()` writes a line of your own, and the `log.requests()` middleware writes a line for every request:
+
+```javascript
+import cpeak, { log } from "cpeak";
+
+const server = cpeak();
+
+server.beforeEach(log.requests());
+
+server.route("get", "/", (req, res) => {
+  log("Someone said hi");
+  return res.json({ message: "Hi there!" });
+});
+
+server.listen(3000, () => {
+  log("Server has started on port 3000");
+});
+```
+
+The lines go to stdout and look like this:
+
+```
+2026-10-15 14:00:00 -- Server has started on port 3000
+2026-10-15 14:00:02 -- Someone said hi
+2026-10-15 14:00:02 -- ::ffff:127.0.0.1 -- GET / 200 OK -- 0.21 ms
+```
+
+Like any middleware, where you put `log.requests()` decides which requests get a line. The ones that end before they reach it don't, so to leave out the files that `serveStatic()` sends, put it after that:
+
+```javascript
+server.beforeEach(serveStatic("./public")); // these never reach the log
+server.beforeEach(log.requests());
+```
+
+Or put it in front of everything to log them all. It also works on a single route, like `server.route("get", "/api/orders", log.requests(), handler)`. The time in a line is from when the request came in, not from when it reached `log.requests()`.
+
+To log an error, pass it to `log()`. It goes to the log of errors (stderr by default), with its name, its message and its stack trace. Your `handleErr` is a good place for it:
+
+```javascript
+server.handleErr((error, req, res) => {
+  if (error && error.status) {
+    return res.status(error.status).json({ error: error.message });
+  }
+  log(error);
+  return res.status(500).json({
+    error: "Sorry, something unexpected happened on our side."
+  });
+});
+```
+
+Where the lines go is up to the `log` option of your app. Here it is with everything in it, and what each one is when you leave it out:
+
+```javascript
+const server = cpeak({
+  log: {
+    // Where log("...") and the request lines go. Default: "stdout"
+    // A {day} in the path starts a new file every day, and the folders are made for you.
+    output: { file: "logs/{day}/info.log" },
+    // Where log(error) goes. Default: "stderr"
+    errors: { file: "logs/{day}/errors.log" },
+
+    // The clock of the dates (and of when a {day} file starts). Default: "utc"
+    timeZone: "local",
+
+    // The lines are collected and written out together once there are this many bytes,
+    // or once this many milliseconds have passed. Defaults: 64KB and 100ms
+    bufferSize: 64 * 1024,
+    flushEvery: 100
+  }
+});
+```
+
+And these are the options of `log.requests()`:
+
+```javascript
+server.beforeEach(
+  log.requests({
+    format: "{date} -- {ip} -- {method} {url} {status} {status_message} -- {ms} ms",
+    // Behind a proxy or a load balancer, read the IP of the client from this header
+    // (when it has a value). Default: the address of the connection
+    ipHeader: "x-forwarded-for",
+
+    // Which requests get a line. Default: all of them. With more than one of these
+    // set, a request has to pass every one.
+    onlyErrors: false,                       // only a status of 400 and above
+    slowerThan: 500,                         // only the slow ones (milliseconds)
+    sample: 100,                             // only 1 in 100
+    skip: (req, res) => req.url === "/health" // your own rule
+  })
+);
+```
+
+These are the names you can use in `format`:
+
+| Name | What it writes |
+| --- | --- |
+| `{date}` | `2026-10-15 14:00:00` |
+| `{iso}` | `2026-10-15T14:00:00.123Z` (or `-04:00` instead of the `Z` with `timeZone: "local"`) |
+| `{ip}` | the IP of the client |
+| `{method}` | `GET` |
+| `{url}` | the URL the request came in with, like `/users?filter=active` |
+| `{path}` | the URL without the query string |
+| `{status}` | `302` |
+| `{status_message}` | `Found` |
+| `{ms}` | how long the request took, in milliseconds (`0.21`) |
+| `{us}` | how long the request took, in microseconds (`210`) |
+| `{bytes}` | the size of the body that was sent |
+| `{header:NAME}` | any request header, like `{header:user-agent}` (`-` when it's missing) |
+
+A name that isn't on the list throws when `log.requests()` is called, so a typo shows up right away.
+
+The log is made to keep up with a busy server. The lines are collected in a buffer and written out together, and the writing happens off the event loop, so a request never waits for the disk. If the disk can't keep up, the lines that don't fit in line are dropped instead of piling up in memory, and the log says how many once it catches up. An error is written right away, and never dropped. What's left is written when the server closes, and when the program exits (with `process.exit()`, or once there's nothing left to do). A program that a signal stops without a handler for it (like SIGTERM, from a process manager) can lose the lines of its last `flushEvery`, so call `process.exit()` in your SIGTERM handler.
+
+`log()` works anywhere, and goes where the `log` option of your app says. When no app has the option, the text goes to stdout and the errors to stderr.
 
 ### Listening
 

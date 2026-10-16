@@ -1,5 +1,6 @@
 import http from "node:http";
 import fs from "node:fs/promises";
+import { performance } from "node:perf_hooks";
 import { createReadStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 
@@ -18,8 +19,17 @@ import {
   ErrorCode,
   isClientDisconnect
 } from "./internal/errors";
+import {
+  startLog,
+  byteLength,
+  log,
+  logsRequests,
+  defaultLogger,
+  type Logger,
+  type RequestLog
+} from "./internal/log";
 
-export { frameworkError, ErrorCode, isClientDisconnect };
+export { frameworkError, ErrorCode, isClientDisconnect, log };
 
 import type {
   StringMap,
@@ -66,6 +76,30 @@ export class CpeakIncomingMessage extends http.IncomingMessage {
 export class CpeakServerResponse extends http.ServerResponse<CpeakIncomingMessage> {
   // Set per-request from the Cpeak instance. Undefined when compression isn't enabled.
   _compression?: ResolvedCompressionConfig;
+  // How many bytes of body went out, for the {bytes} of the request log (only counted when
+  // there is a log.requests())
+  _countBytes = false;
+  _bodyBytes = 0;
+  // For log.requests(): when the request came in, the URL it came in with, the app's log, and
+  // the log.requests() it went through
+  declare _started?: number;
+  declare _url?: string;
+  declare _log?: Logger;
+  declare _requestLog?: RequestLog;
+
+  write(chunk: any, encoding?: any, cb?: any): boolean {
+    if (this._countBytes && this.req?.method !== "HEAD") {
+      this._bodyBytes += byteLength(chunk, encoding);
+    }
+    return super.write(chunk, encoding, cb);
+  }
+
+  end(chunk?: any, encoding?: any, cb?: any): this {
+    if (this._countBytes && this.req?.method !== "HEAD") {
+      this._bodyBytes += byteLength(chunk, encoding);
+    }
+    return super.end(chunk, encoding, cb);
+  }
 
   // Send a file back to the client
   async sendFile(path: string, mime?: string) {
@@ -195,6 +229,7 @@ export class Cpeak {
   #handleErr?: (err: unknown, req: CpeakRequest, res: CpeakResponse) => void;
   #fallback?: Handler;
   #compression?: ResolvedCompressionConfig;
+  #log?: Logger;
 
   constructor(options: CpeakOptions = {}) {
     this.#server = http.createServer({
@@ -212,10 +247,29 @@ export class Cpeak {
     // Merge developer-supplied mime types with the defaults once at startup
     if (options.mimeTypes) Object.assign(MIME_TYPES, options.mimeTypes);
 
+    // Where the lines of the log go, once at app startup.
+    if (options.log) {
+      this.#log = startLog(options.log);
+    }
+    // What the requests in progress logged gets written once the server closes
+    this.#server.on("close", () => {
+      if (this.#log) this.#log.flush();
+      else if (logsRequests()) defaultLogger().flush();
+    });
+
     this.#server.on(
       "request",
       async (req: CpeakRequest, res: CpeakResponse) => {
         res._compression = this.#compression;
+
+        // What a log.requests() needs for its line (the URL is the one the request came in
+        // with, whatever a middleware function does to req.url)
+        if (logsRequests()) {
+          res._started = performance.now();
+          res._url = req.url || "";
+          res._log = this.#log;
+          res._countBytes = true;
+        }
 
         // Get the url without the URL parameters (query strings)
         const qIndex = req.url?.indexOf("?");
@@ -434,7 +488,13 @@ export type {
   CorsOptions
 } from "./utils/types";
 
-export type { CompressionOptions } from "./internal/types";
+export type {
+  CompressionOptions,
+  LogOptions,
+  LogOutput,
+  LogTimeZone,
+  RequestLogOptions
+} from "./internal/types";
 
 export type {
   CpeakHttpServer,
