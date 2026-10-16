@@ -38,6 +38,10 @@ Cpeak started as an educational project, and we now run our own products on it. 
   - [Compression](#compression)
   - [Error Handling](#error-handling)
   - [Waiting](#waiting)
+  - [Running in the Background](#running-in-the-background)
+  - [Running on the Same Thread](#running-on-the-same-thread)
+  - [Blocking Work](#blocking-work)
+  - [Without a Server](#without-a-server)
   - [Listening](#listening)
   - [HTTPS](#https)
   - [TLS in the Rest of Your App](#tls-in-the-rest-of-your-app)
@@ -556,6 +560,96 @@ server.route("get", "/slow", async |req, res| {
 
 Only that request waits. Its worker thread handles other requests in the meantime, so thousands of requests can be waiting at once. Don't use `std::thread::sleep` in your routes: it stops the whole worker thread, and every request on it.
 
+### Running in the Background
+
+To start something without making the response wait for it (sending an email, calling another service, ...), use `cpeak::spawn`. It's what calling an async function without `await` is in Node.js:
+
+```rust
+server.route("post", "/signup", async |req, res| {
+    let email = req.body["email"].as_str().unwrap_or_default().to_string();
+
+    cpeak::spawn(async move {
+        send_welcome_email(&email).await;
+    });
+
+    return res.status(201).json(json!({ "message": "Welcome!" }));
+});
+```
+
+What you spawn runs on a background event loop, which Cpeak keeps apart from the ones that handle your requests, so it keeps going after the response is sent. That event loop is on other threads than your route, so what you move into it has to be `Send` (a `String`, a number, an `Arc`, a database pool, ... but not `req` or `res`).
+
+`cpeak::spawn` gives you back a handle. If you do want to wait for the result, `.await` it:
+
+```rust
+let total = cpeak::spawn(async { count_the_rows().await }).await?;
+```
+
+The background event loop runs on 4 threads. If your app spawns a lot, give it more:
+
+```rust
+let mut server = Cpeak::new(CpeakOptions {
+    background_threads: Some(8),
+    ..Default::default()
+});
+```
+
+The background event loop starts the first time something needs it, so call `Cpeak::new()` before `cpeak::spawn` and `cpeak::run`. If it has already started, it keeps the threads it has, and Cpeak lets you know.
+
+### Running on the Same Thread
+
+If what you start is small and happens on many requests, like counting a view or filling a cache, use `cpeak::spawn_local` instead:
+
+```rust
+server.route("get", "/:code", async |req, res| {
+    let code = req.params["code"].clone();
+
+    cpeak::spawn_local(async move {
+        count_the_view(&code).await;
+    });
+
+    return res.redirect("https://example.com");
+});
+```
+
+It runs on the worker thread that handles the request. That's closer to Node.js than `cpeak::spawn`: an async function that you call without `await` in Node.js also keeps running on the event loop that called it. Starting it doesn't hand anything to another thread, which adds up when it happens on every request, and what you move into it doesn't have to be `Send`.
+
+In exchange, it takes turns with the requests of that worker, so keep it short, and it stops with the worker: if the server shuts down before it's done, it doesn't finish. For something that has to finish, like sending an email, use `cpeak::spawn`.
+
+`cpeak::spawn_local` only works in routes and middleware functions, where there is a worker thread to run on. It panics anywhere else (in `cpeak::run`, or in what you gave to `cpeak::spawn`).
+
+### Blocking Work
+
+Your routes run on event loops, and while a route runs code that doesn't `.await`, nothing else on its worker thread can run. That's fine for most code, but not for code that takes a while: hashing a password, resizing an image, compressing a big file, or a library that has no async version. Run that with `cpeak::spawn_blocking`. It's what the thread pool of Node.js is for (the one that runs `crypto.pbkdf2()` and `fs.readFile()` for you):
+
+```rust
+server.route("post", "/thumbnail", async |req, res| {
+    let image = req.body["image"].as_str().unwrap_or_default().to_string();
+
+    let thumbnail = cpeak::spawn_blocking(move || make_a_thumbnail(&image)).await?;
+
+    return res.json(json!({ "thumbnail": thumbnail }));
+});
+```
+
+You give it a regular function, not an async one. It runs on a pool of threads made for this, and the route waits for the result with `.await` without stopping its worker. The pool is shared by the whole app and works in `cpeak::run` too. Threads are added as they're needed and go away once they're idle for a while.
+
+### Without a Server
+
+Not every program is a server: a script that seeds your database, a worker that takes jobs off a queue, a test. For those, `cpeak::run` runs your async code to the end. It's what the top-level `await` is in Node.js:
+
+```rust
+fn main() {
+    cpeak::run(async {
+        let users = load_users().await;
+        println!("{} users", users.len());
+    });
+}
+```
+
+`cpeak::run` gives back what your code returns, and you can use `cpeak::sleep` and `cpeak::spawn` in it. It runs on the same background event loop as `cpeak::spawn`, and that one stays around after `run` returns. So you can call it more than once (once per test, for example), and what one call started, like a pool of database connections, is still there for the next one.
+
+Call it from regular code only. Inside async code (a route, or the code you gave to `run`), just `.await`.
+
 ### Listening
 
 Start listening on a specific port like this:
@@ -637,7 +731,7 @@ Under the hood this is [rustls](https://github.com/rustls/rustls), with TLS 1.3 
 
 ### TLS in the Rest of Your App
 
-Your app will likely use TLS for more than its own server: to call an API over HTTPS, to connect to a managed database or to Redis. In Node.js the TLS library comes with the runtime, so you never have to choose one. Cpeak does the same for a Rust program: the first time you create a server, it makes [ring](https://github.com/briansmith/ring), the crypto library of its own HTTPS server, the one that everything built on rustls in your program uses.
+Your app will likely use TLS for more than its own server: to call an API over HTTPS, to connect to a managed database or to Redis. In Node.js the TLS library comes with the runtime, so you never have to choose one. Cpeak does the same for a Rust program: the first time you create a server (or call `cpeak::run`), it makes [ring](https://github.com/briansmith/ring), the crypto library of its own HTTPS server, the one that everything built on rustls in your program uses.
 
 So for the crates that give you the choice, go with rustls and let the program decide on the crypto library, without bringing in a second one:
 

@@ -13,6 +13,8 @@ pub struct CpeakOptions {
     pub mime_types: StringMap,
     // Serve the app over HTTPS, with this key and certificate
     pub https: Option<HttpsOptions>,
+    // How many threads cpeak::spawn() runs things on (4 if you leave it out)
+    pub background_threads: Option<usize>,
 }
 
 pub type StringMap = HashMap<String, String>;

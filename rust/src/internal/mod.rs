@@ -1,6 +1,7 @@
 pub(crate) mod compression;
 pub(crate) mod crypto;
 pub(crate) mod errors;
+pub(crate) mod event_loop;
 pub(crate) mod files;
 pub(crate) mod json;
 pub(crate) mod mime_types;

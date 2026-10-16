@@ -12,6 +12,7 @@ fn should_keep_the_crypto_library_that_the_app_picked() {
     own.install_default().unwrap();
 
     let _server = cpeak();
+    cpeak::run(async {});
 
     let picked = CryptoProvider::get_default().unwrap();
     assert_eq!(picked.cipher_suites.len(), 1);

@@ -261,7 +261,7 @@ async fn pbkdf2_async(
 ) -> Result<Vec<u8>, CpeakError> {
     let password = password.as_bytes().to_vec();
     let digest = digest.to_string();
-    tokio::task::spawn_blocking(move || pbkdf2_sync(&password, &salt, iterations, keylen, &digest))
+    crate::spawn_blocking(move || pbkdf2_sync(&password, &salt, iterations, keylen, &digest))
         .await
         .map_err(|error| CpeakError::other(format!("PBKDF2 failed: {error}")))?
 }

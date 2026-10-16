@@ -35,6 +35,7 @@ use hyper::{Request, Response, StatusCode};
 use socket2::{Domain, Socket, Type};
 use tokio::sync::{mpsc, watch};
 
+use crate::internal::event_loop;
 use crate::internal::socket;
 use crate::internal::timers;
 use crate::internal::tls;
@@ -769,6 +770,8 @@ fn run_worker(app: Arc<Cpeak>, connections: Connections) {
         .enable_all()
         .build()
         .unwrap_or_else(|error| panic!("[cpeak] Failed to start a worker: {error}"));
+    // For cpeak::spawn_local()
+    event_loop::mark_as_worker();
     // For cpeak::sleep()
     timers::start(&runtime);
     keep_timer_driver_set(&runtime);

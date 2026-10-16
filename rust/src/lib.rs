@@ -46,6 +46,7 @@ use crate::utils::auth::AuthState;
 
 pub use crate::internal::compression::{Body, Readable};
 pub use crate::internal::errors::{framework_error, is_client_disconnect, CpeakError, ErrorCode};
+pub use crate::internal::event_loop::{run, spawn, spawn_blocking, spawn_local};
 pub use crate::internal::server::{CpeakServer, ListenAddress};
 pub use crate::internal::timers::sleep;
 pub use crate::internal::types::{BrotliOptions, CompressionOptions, HttpsOptions, ZlibOptions};
@@ -56,6 +57,8 @@ pub use crate::types::{
 // So `use cpeak::{json, Value};` is all you need to read and send JSON, without adding
 // serde_json yourself. from_value() turns a Value (like req.body) into a struct of your own.
 pub use serde_json::{from_value, json, Value};
+// What cpeak::spawn(), cpeak::spawn_local() and cpeak::spawn_blocking() give back
+pub use tokio::task::JoinHandle;
 
 // What the crypto module is in Node.js: random bytes, a hash, and bytes written as text
 pub mod crypto {
@@ -658,6 +661,11 @@ impl Cpeak {
     pub fn new(options: CpeakOptions) -> Self {
         // The crypto library for everything in the program that uses rustls (see internal/tls.rs)
         internal::tls::install_crypto_provider();
+
+        // How many threads cpeak::spawn() gets, if the app wants another number than the default
+        if let Some(threads) = options.background_threads {
+            internal::event_loop::set_background_threads(threads);
+        }
 
         // Resolve compression options once at app startup.
         let compression = options.compression.map(resolve_compression_options);
