@@ -77,6 +77,13 @@ cargo add cpeak --no-default-features --features preserve_order
 
 (`preserve_order` is Cpeak's other default feature, see [parse_json](#parse_json).)
 
+For about 3% more speed at the cost of roughly 1 MB more memory per thread, you can switch
+mimalloc to its version 2. No code changes needed:
+
+```bash
+cargo add mimalloc@0.1 --no-default-features --features v2
+```
+
 ### Hello World App:
 
 ```rust
