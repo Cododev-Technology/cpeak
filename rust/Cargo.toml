@@ -48,12 +48,16 @@ regex = "1"
 libc = "0.2"
 
 [features]
-default = ["mimalloc"]
+default = ["mimalloc", "preserve_order"]
 # Use mimalloc as your program's memory allocator. Almost everything a request does (building
 # req.headers, parsing a JSON body, ...) allocates memory, and mimalloc does that a lot faster
 # than the system allocator, especially with many threads. Only one allocator can be set per
 # program, so turn this off (default-features = false) if your app sets its own #[global_allocator].
 mimalloc = ["dep:mimalloc"]
+# Keep the keys of a JSON object in the order they were added, like JavaScript does:
+# json!({ "zebra": 1, "apple": 2 }) is sent as {"zebra":1,"apple":2}, and req.body has its keys
+# in the order the client sent them. Without it, they are sorted by name.
+preserve_order = ["serde_json/preserve_order"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

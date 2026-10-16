@@ -52,8 +52,9 @@ pub use crate::types::{
     CpeakOptions, ErrorHandler, Handler, IntoRouteMiddleware, Middleware, Next, RouteMiddleware,
     StringMap,
 };
-// So `use cpeak::json;` is all you need to send JSON, without adding serde_json yourself
-pub use serde_json::json;
+// So `use cpeak::{json, Value};` is all you need to read and send JSON, without adding
+// serde_json yourself. from_value() turns a Value (like req.body) into a struct of your own.
+pub use serde_json::{from_value, json, Value};
 
 pub struct CpeakRequest {
     pub method: String,

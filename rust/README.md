@@ -59,13 +59,15 @@ Ready to dive in? Install **Cpeak** via cargo:
 cargo add cpeak
 ```
 
-That's it, no async runtime or JSON crate to set up. Cpeak brings its own event loops, and gives you the `json!` macro. Your routes and middleware functions are async closures, so Cpeak needs Rust 1.85 or newer.
+That's it, no async runtime or JSON crate to set up. Cpeak brings its own event loops, and gives you the `json!` macro and the `Value` type of JSON. Your routes and middleware functions are async closures, so Cpeak needs Rust 1.85 or newer.
 
 For the best performance, Cpeak makes [mimalloc](https://github.com/microsoft/mimalloc) the memory allocator of your program. A program can only have one, so if your app sets its own `#[global_allocator]`, install Cpeak without it:
 
 ```bash
-cargo add cpeak --no-default-features
+cargo add cpeak --no-default-features --features preserve_order
 ```
+
+(`preserve_order` is Cpeak's other default feature, see [parse_json](#parse_json).)
 
 ### Hello World App:
 
@@ -697,7 +699,13 @@ server.route("put", "/api/user", async |req, res| {
 });
 ```
 
-`req.body` is a `serde_json::Value`, so you can also turn it into your own struct with serde, like `let user: User = serde_json::from_value(req.body.clone())?;`.
+`req.body` is a `cpeak::Value` (the `Value` of serde_json, which is also what `json!` makes). To turn it into a struct of your own that derives serde's `Deserialize`, use `cpeak::from_value`:
+
+```rust
+let user: User = cpeak::from_value(req.body.clone())?;
+```
+
+The keys of a JSON object stay in the order they were added, like in JavaScript: `json!({ "zebra": 1, "apple": 2 })` is sent as `{"zebra":1,"apple":2}`, and `req.body` has its keys in the order the client sent them. That is Cpeak's `preserve_order` feature, which is on by default. Without it (`default-features = false`), the keys are sorted by name, and building and parsing a JSON object is a bit faster: about a fifth of a microsecond for an object of 12 keys.
 
 JSON is read and written by [sonic-rs](https://github.com/cloudwego/sonic-rs), which gives the exact same output as serde_json, just faster.
 
