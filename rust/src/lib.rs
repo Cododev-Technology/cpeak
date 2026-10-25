@@ -167,8 +167,23 @@ impl CpeakRequest {
                 }
                 Some(Err(error)) => {
                     self.incoming = None;
+                    // hyper couldn't make sense of the body (a broken chunked encoding, for
+                    // example). That's the client's mistake, so it's a 400 Bad Request.
+                    let malformed = std::error::Error::source(&error)
+                        .and_then(|source| source.downcast_ref::<io::Error>())
+                        .is_some_and(|source| {
+                            matches!(
+                                source.kind(),
+                                io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData
+                            )
+                        });
                     let mut error = CpeakError::from(error);
-                    error.client_disconnect = true;
+                    if malformed {
+                        error.status = Some(400);
+                        error.message = "Malformed request body".into();
+                    } else {
+                        error.client_disconnect = true;
+                    }
                     return Err(error);
                 }
             }
@@ -857,7 +872,7 @@ impl Cpeak {
         let Some(handle_err) = &self.handle_err else {
             eprintln!("[cpeak] Unhandled error (register an error handler with server.handle_err): {error:?}");
             if !res.headers_sent() {
-                res.status_code = 500;
+                res.status_code = error.status.unwrap_or(500);
                 let _ = res.end(Bytes::new());
             }
             return;
