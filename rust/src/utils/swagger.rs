@@ -20,15 +20,15 @@ pub fn swagger(spec: &impl Serialize, prefix: Option<&str>) -> impl Middleware {
     );
 
     async move |req: &mut CpeakRequest, res: &mut CpeakResponse, next: Next| {
-        if req.url == prefix || req.url == format!("{prefix}/") {
+        if req.url() == prefix || req.url() == format!("{prefix}/") {
             let location = format!("{prefix}/index.html");
             res.write_head(302, &[("Location", location.as_str())]);
             return res.end("");
         }
-        if req.url == format!("{prefix}/spec.json") {
+        if req.url() == format!("{prefix}/spec.json") {
             return res.json(&spec);
         }
-        if req.url == format!("{prefix}/swagger-initializer.js") {
+        if req.url() == format!("{prefix}/swagger-initializer.js") {
             res.set_header("Content-Type", "application/javascript");
             return res.end(initializer_js.clone());
         }

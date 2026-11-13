@@ -7,7 +7,7 @@ pub mod utils;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::any::Any;
+use std::borrow::Cow;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::fmt::{Display, Write as _};
@@ -20,36 +20,40 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use bytes::Bytes;
-use hyper::body::Incoming;
+use bytes::{Buf, Bytes};
 use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
 use hyper::StatusCode;
 use serde::Serialize;
 
+use crate::internal::body::HttpResponseBody;
 use crate::internal::compression::{
     compress_and_send, compress_and_send_buffer, pipe, resolve_compression_options,
     send_precompressed,
 };
 use crate::internal::errors::CatchUnwind;
 use crate::internal::files::{self, File};
+use crate::internal::header_maps;
 use crate::internal::json;
 use crate::internal::log::{Logger, RequestLog};
 use crate::internal::mime_types::{get_mime, register_mime_types};
 use crate::internal::router::Router;
 use crate::internal::server::{ResponseBody, ResponseSender};
 use crate::internal::tls::{resolve_https_options, ResolvedHttpsConfig};
+use crate::internal::tower::DynLayer;
 use crate::internal::types::ResolvedCompressionConfig;
 use crate::internal::uri::parse_search_params;
 use crate::types::{DynErrorHandler, DynHandler, DynMiddleware};
 use crate::utils::auth::AuthState;
 
+pub use crate::internal::body::{BodyError, RequestBody};
 pub use crate::internal::compression::{Body, Readable};
 pub use crate::internal::errors::{framework_error, is_client_disconnect, CpeakError, ErrorCode};
 pub use crate::internal::event_loop::{run, spawn, spawn_blocking, spawn_local};
 pub use crate::internal::log::{log, log_requests, LogMessage};
 pub use crate::internal::server::{CpeakServer, ListenAddress};
-pub use crate::internal::shutdown::on_shutdown;
+pub use crate::internal::shutdown::{closing, on_shutdown};
 pub use crate::internal::timers::sleep;
+pub use crate::internal::tower::{layer, service, Rest, RestFuture};
 pub use crate::internal::types::{
     BrotliOptions, CompressionOptions, HttpsOptions, LogOptions, LogOutput, LogTimeZone,
     RequestLogOptions, ZlibOptions,
@@ -63,6 +67,8 @@ pub use crate::types::{
 pub use serde_json::{from_value, json, Value};
 // What cpeak::spawn(), cpeak::spawn_local() and cpeak::spawn_blocking() give back
 pub use tokio::task::JoinHandle;
+// The http crate's types (http::Method, http::HeaderMap, ...), without adding it as a dependency
+pub use http;
 
 // What the crypto module is in Node.js: random bytes, a hash, and bytes written as text
 pub mod crypto {
@@ -70,11 +76,14 @@ pub mod crypto {
 }
 
 pub struct CpeakRequest {
-    pub method: String,
-    // The path and the query string, like /users?filter=active
-    pub url: String,
-    // The request headers. Just like in Node.js, the header names are lower-cased.
-    pub headers: StringMap,
+    // The method, headers, extensions (req.set()) and body. Other crates get it through
+    // req.as_http_mut(), cpeak::layer() and cpeak::service().
+    http: http::Request<RequestBody>,
+    // The path and the query string. as_http_mut() parses it into the http::Request's Uri, and
+    // from then on (url_in_uri) the Uri has the URL.
+    url: String,
+    url_in_uri: bool,
+
     pub remote_address: SocketAddr,
     pub body: serde_json::Value,
     pub params: StringMap,
@@ -85,23 +94,20 @@ pub struct CpeakRequest {
     // None means the signature was invalid, or the value was tampered with
     pub signed_cookies: HashMap<String, Option<String>>,
 
-    incoming: Option<Incoming>,
-    // req.url as the request came in with it, kept aside while there is middleware that could
-    // change req.url. We route on this one, like the Node.js version does.
+    // The URL the request came in with, kept aside while there is middleware that could change
+    // it. We route on this one.
     pub(crate) original_url: Option<String>,
     // Set by the auth() middleware
     pub(crate) auth: Option<&'static AuthState>,
-    // Allow developers to add their own extensions (e.g. req.set("test", ...))
-    extensions: HashMap<String, Box<dyn Any>>,
+    // Set by a cpeak::layer() middleware function, for the runner (see internal/tower.rs)
+    pub(crate) pending_layer: Option<&'static dyn DynLayer>,
 }
 
 impl CpeakRequest {
     pub(crate) fn new(
-        method: String,
+        http: http::Request<RequestBody>,
         url: String,
-        headers: StringMap,
         remote_address: SocketAddr,
-        incoming: Incoming,
     ) -> Self {
         // Parse the URL parameters (like /users?key1=value1&key2=value2)
         let query = match url.bytes().position(|byte| byte == b'?') {
@@ -110,51 +116,89 @@ impl CpeakRequest {
         };
 
         Self {
-            method,
+            http,
             url,
-            headers,
+            url_in_uri: false,
             remote_address,
             body: serde_json::Value::Null,
             params: StringMap::new(),
             query,
             cookies: StringMap::new(),
             signed_cookies: HashMap::new(),
-            incoming: Some(incoming),
             original_url: None,
             auth: None,
-            extensions: HashMap::new(),
+            pending_layer: None,
         }
     }
 
-    // Attach your own value to the request, like `req.custom = "This is some string"` in the Node.js version
-    pub fn set<T: Any>(&mut self, key: impl Into<String>, value: T) {
-        self.extensions.insert(key.into(), Box::new(value));
+    // The method. It compares with a string too: req.method() == "POST"
+    pub fn method(&self) -> &http::Method {
+        self.http.method()
     }
 
-    // Read a value you attached before, like `req.custom` in the Node.js version
-    pub fn get<T: Any>(&self, key: &str) -> Option<&T> {
-        self.extensions.get(key)?.downcast_ref()
+    // The path and the query string, like /users?filter=active
+    pub fn url(&self) -> &str {
+        if !self.url_in_uri {
+            return &self.url;
+        }
+        self.http
+            .uri()
+            .path_and_query()
+            .map_or("/", |path_and_query| path_and_query.as_str())
     }
 
-    pub fn get_mut<T: Any>(&mut self, key: &str) -> Option<&mut T> {
-        self.extensions.get_mut(key)?.downcast_mut()
+    // A header by its name, upper or lower case. For a header sent more than once, the first value
+    // (req.headers().get_all() has them all). None if it's missing or isn't plain text.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.http.headers().get(name)?.to_str().ok()
+    }
+
+    // All the headers
+    pub fn headers(&self) -> &HeaderMap {
+        self.http.headers()
+    }
+
+    // The request as an http::Request, for crates that take one (like a WebSocket upgrade).
+    // Changes made to it are what the rest of the app sees.
+    pub fn as_http_mut(&mut self) -> &mut http::Request<RequestBody> {
+        if !self.url_in_uri {
+            self.url_in_uri = true;
+            *self.http.uri_mut() = parse_uri(&self.url);
+        }
+        &mut self.http
+    }
+
+    // Attach a value to the request. The type is the key, so there's one value per type: wrap a
+    // String in a type of its own (struct SessionId(String)) to keep it apart from other strings.
+    // The values are the http::Request's extensions, which tower layers use too.
+    pub fn set<T: Clone + Send + Sync + 'static>(&mut self, value: T) {
+        self.http.extensions_mut().insert(value);
+    }
+
+    // A value attached with req.set()
+    pub fn get<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.http.extensions().get::<T>()
+    }
+
+    pub fn get_mut<T: Send + Sync + 'static>(&mut self) -> Option<&mut T> {
+        self.http.extensions_mut().get_mut::<T>()
     }
 
     // Read the next chunk of the request body, or None once the whole body has been read.
     // This is how you consume the request as a stream, like `req.on("data", ...)` in Node.js.
     pub async fn chunk(&mut self) -> Result<Option<Bytes>, CpeakError> {
         loop {
-            let Some(incoming) = self.incoming.as_mut() else {
+            let body = self.http.body_mut();
+            if body.is_done() {
                 return Ok(None);
-            };
-            let frame = std::future::poll_fn(|cx| {
-                hyper::body::Body::poll_frame(Pin::new(&mut *incoming), cx)
-            })
-            .await;
+            }
+            let frame =
+                std::future::poll_fn(|cx| http_body::Body::poll_frame(Pin::new(&mut *body), cx))
+                    .await;
 
             match frame {
                 None => {
-                    self.incoming = None;
+                    body.set_done();
                     return Ok(None);
                 }
                 Some(Ok(frame)) => {
@@ -166,7 +210,7 @@ impl CpeakRequest {
                     }
                 }
                 Some(Err(error)) => {
-                    self.incoming = None;
+                    body.set_done();
                     // hyper couldn't make sense of the body (a broken chunked encoding, for
                     // example). That's the client's mistake, so it's a 400 Bad Request.
                     let malformed = std::error::Error::source(&error)
@@ -190,10 +234,103 @@ impl CpeakRequest {
         }
     }
 
-    // req.url as the request came in with it
-    pub(crate) fn original_url(&self) -> &str {
-        self.original_url.as_deref().unwrap_or(&self.url)
+    // A header, with its values joined by `separator` when it was sent more than once ("; " for
+    // cookie, ", " for the rest). Empty if it's missing.
+    pub(crate) fn joined_header(&self, name: &str, separator: &str) -> Cow<'_, str> {
+        let mut values = self
+            .http
+            .headers()
+            .get_all(name)
+            .iter()
+            .filter_map(|value| value.to_str().ok());
+        let Some(first) = values.next() else {
+            return Cow::Borrowed("");
+        };
+        let Some(second) = values.next() else {
+            return Cow::Borrowed(first);
+        };
+        let mut joined = format!("{first}{separator}{second}");
+        for value in values {
+            joined.push_str(separator);
+            joined.push_str(value);
+        }
+        Cow::Owned(joined)
     }
+
+    // The URL the request came in with
+    pub(crate) fn original_url(&self) -> &str {
+        match &self.original_url {
+            Some(url) => url,
+            None => self.url(),
+        }
+    }
+
+    // Hands the http::Request to a tower Layer or Service. What stays behind keeps the method and
+    // the URL, for the request log.
+    pub(crate) fn take_http(&mut self) -> http::Request<RequestBody> {
+        if self.url_in_uri {
+            self.url = self.url().to_owned();
+        }
+        let remote_address = self.remote_address;
+        let http = self.as_http_mut();
+        // Where crates look for the client's address
+        if http.extensions().get::<SocketAddr>().is_none() {
+            http.extensions_mut().insert(remote_address);
+        }
+        #[cfg(feature = "axum")]
+        if http
+            .extensions()
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+            .is_none()
+        {
+            http.extensions_mut()
+                .insert(axum::extract::ConnectInfo(remote_address));
+        }
+        let mut left = http::Request::new(RequestBody::empty());
+        *left.method_mut() = http.method().clone();
+        self.url_in_uri = false;
+        std::mem::replace(&mut self.http, left)
+    }
+
+    // The http::Request back from a tower Layer
+    pub(crate) fn put_http(&mut self, http: http::Request<RequestBody>) {
+        self.http = http;
+        self.url_in_uri = true;
+    }
+
+    // Moves the whole request out, for the rest of the request under a tower Layer. What stays
+    // behind keeps the method and the URL, for the request log, until the request comes back.
+    pub(crate) fn take_whole(&mut self) -> CpeakRequest {
+        let mut http = http::Request::new(RequestBody::empty());
+        *http.method_mut() = self.http.method().clone();
+        let left = CpeakRequest {
+            http,
+            url: self.url().to_owned(),
+            url_in_uri: false,
+            remote_address: self.remote_address,
+            body: serde_json::Value::Null,
+            params: StringMap::new(),
+            query: StringMap::new(),
+            cookies: StringMap::new(),
+            signed_cookies: HashMap::new(),
+            original_url: self.original_url.clone(),
+            auth: None,
+            pending_layer: None,
+        };
+        std::mem::replace(self, left)
+    }
+}
+
+impl Drop for CpeakRequest {
+    fn drop(&mut self) {
+        // The header map goes to a later response of this worker (see header_maps.rs)
+        header_maps::give_back(std::mem::take(self.http.headers_mut()));
+    }
+}
+
+// The URL came from a Uri that hyper parsed, so this doesn't fail. If it ever does, the URL is "/".
+fn parse_uri(url: &str) -> http::Uri {
+    http::Uri::try_from(url).unwrap_or_default()
 }
 
 // A URL without its query string
@@ -229,23 +366,18 @@ pub struct CpeakResponse {
 }
 
 impl CpeakResponse {
-    // `headers` is an empty map to fill in (the server reuses the one of the request, see server.rs)
-    pub(crate) fn new(
-        sender: ResponseSender,
-        req: &CpeakRequest,
-        headers: HeaderMap,
-        accept_encoding: String,
-    ) -> Self {
+    pub(crate) fn new(sender: ResponseSender, req: &CpeakRequest, accept_encoding: String) -> Self {
         Self {
             status_code: 200,
-            headers,
+            // Empty, without anything allocated: see headers_mut()
+            headers: HeaderMap::new(),
             headers_sent: false,
             finished: false,
             sender,
             finish_listeners: Vec::new(),
             body_bytes: 0,
             compression: None,
-            req_is_head: req.method == "HEAD",
+            req_is_head: req.method() == http::Method::HEAD,
             req_accept_encoding: accept_encoding,
             render_enabled: false,
             cookie_secret: None,
@@ -445,7 +577,7 @@ impl CpeakResponse {
     pub fn set_header(&mut self, name: &str, value: impl Display) -> &mut Self {
         self.assert_headers_not_sent();
         let (name, value) = header_pair(name, value);
-        self.headers.insert(name, value);
+        self.headers_mut().insert(name, value);
         self
     }
 
@@ -453,7 +585,7 @@ impl CpeakResponse {
     pub fn append_header(&mut self, name: &str, value: impl Display) -> &mut Self {
         self.assert_headers_not_sent();
         let (name, value) = header_pair(name, value);
-        self.headers.append(name, value);
+        self.headers_mut().append(name, value);
         self
     }
 
@@ -540,6 +672,67 @@ impl CpeakResponse {
         Ok(())
     }
 
+    // Sends a response made by another crate (a WebSocket upgrade's 101, a tower Service's
+    // response). Its headers replace the ones of the same name set before, and the others stay.
+    pub fn send_response<B>(&mut self, response: http::Response<B>) -> Result<(), CpeakError>
+    where
+        B: http_body::Body + 'static,
+        B::Data: Buf,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        if self.headers_sent {
+            return Ok(());
+        }
+        let (parts, body) = response.into_parts();
+        self.status_code = parts.status.as_u16();
+        let mut name = None;
+        for (header_name, value) in parts.headers {
+            if let Some(header_name) = header_name {
+                self.headers_mut().remove(&header_name);
+                name = Some(header_name);
+            }
+            if let Some(name) = &name {
+                self.headers_mut().append(name.clone(), value);
+            }
+        }
+
+        self.finished = true;
+        self.headers_sent = true;
+        let size = http_body::Body::size_hint(&body).exact();
+        if !self.req_is_head {
+            self.body_bytes += size.unwrap_or(0);
+        }
+        let headers = std::mem::take(&mut self.headers);
+        let body = if size == Some(0) || http_body::Body::is_end_stream(&body) {
+            ResponseBody::Full(None)
+        } else {
+            ResponseBody::Http(HttpResponseBody::new(body))
+        };
+        self.sender.send_head(self.status_code, headers, body);
+        self.emit_finish();
+        Ok(())
+    }
+
+    // The response of the rest of the request under a tower Layer. It writes to `sender`, and
+    // starts with this response's headers and settings.
+    pub(crate) fn for_layer(&mut self, sender: ResponseSender) -> CpeakResponse {
+        CpeakResponse {
+            status_code: self.status_code,
+            headers: std::mem::take(&mut self.headers),
+            headers_sent: false,
+            finished: false,
+            sender,
+            finish_listeners: Vec::new(),
+            body_bytes: 0,
+            compression: self.compression.clone(),
+            req_is_head: self.req_is_head,
+            req_accept_encoding: self.req_accept_encoding.clone(),
+            render_enabled: self.render_enabled,
+            cookie_secret: self.cookie_secret,
+            request_log: self.request_log,
+        }
+    }
+
     // Run a function once the response is sent, like res.on("finish", ...) in Node.js.
     // It gets the status that the response went out with, so add it before the response ends
     // (in a middleware function, for example). It doesn't run for a response that was
@@ -579,6 +772,15 @@ impl CpeakResponse {
         if !self.finished {
             let _ = self.end(Bytes::new());
         }
+    }
+
+    // The header map to add to. It's taken from the worker's maps at the first header, so a
+    // handler that is waiting doesn't hold one.
+    fn headers_mut(&mut self) -> &mut HeaderMap {
+        if self.headers.capacity() == 0 {
+            self.headers = header_maps::take();
+        }
+        &mut self.headers
     }
 
     fn assert_headers_not_sent(&self) {
@@ -725,6 +927,7 @@ pub struct Cpeak {
     pub(crate) https: Option<ResolvedHttpsConfig>,
     // Set when the app has a `log` option
     pub(crate) log: Option<Arc<Logger>>,
+    pub(crate) shutdown_timeout: std::time::Duration,
 }
 
 impl Cpeak {
@@ -759,36 +962,45 @@ impl Cpeak {
             compression,
             https,
             log,
+            shutdown_timeout: options
+                .shutdown_timeout
+                .unwrap_or(std::time::Duration::from_secs(10)),
         }
     }
 
     // Every request starts here (the server has already set res.compression, from its own copy
     // of this Cpeak's option)
-    pub(crate) async fn handle_request(&self, req: &mut CpeakRequest, res: &mut CpeakResponse) {
+    pub(crate) async fn handle_request(
+        self: &Arc<Self>,
+        req: &mut CpeakRequest,
+        res: &mut CpeakResponse,
+    ) {
         // We route on the URL the request came in with, whatever a middleware function does
-        // to req.url. With no middleware, nothing can change it before we get to the router.
+        // to the URL. With no middleware, nothing can change it before we get to the router.
         if !self.middleware.is_empty() {
-            req.original_url = Some(req.url.clone());
+            req.original_url = Some(req.url().to_owned());
         }
-        self.run_middleware(req, res).await
+        self.run_middleware(req, res, 0).await
     }
 
-    // Run all the specific middleware functions for that router only and then run the handler
+    // Run all the specific middleware functions for that router only, from the one at index
+    // `from` on, and then run the handler
     async fn run_handler(
-        &self,
+        self: &Arc<Self>,
         req: &mut CpeakRequest,
         res: &mut CpeakResponse,
         middleware: &[Box<dyn DynMiddleware>],
         cb: &dyn DynHandler,
+        from: usize,
         next_called: &NextCalled,
     ) {
         // A cpeak::log_requests() on this route logs the URL the request came in with, even
-        // if the handler changes req.url
+        // if the handler changes the URL
         if !middleware.is_empty() && req.original_url.is_none() {
-            req.original_url = Some(req.url.clone());
+            req.original_url = Some(req.url().to_owned());
         }
 
-        for route_middleware in middleware {
+        for (index, route_middleware) in middleware.iter().enumerate().skip(from) {
             // Handle the errors by passing them to handleErr to save developers from having to manually handle every error in every route middleware.
             if let Err(error) =
                 CatchUnwind(next_called.run(route_middleware.call(req, res, next_fn()))).await
@@ -798,6 +1010,14 @@ impl Cpeak {
             // The middleware didn't call next(), so this is the end of the line for this request
             if !next_called.get() {
                 return;
+            }
+            // A cpeak::layer(): its layer wraps the rest of the route
+            if let Some(layer) = req.pending_layer.take() {
+                let rest = RestOfChain::Route {
+                    app: self.clone(),
+                    from: index + 1,
+                };
+                return self.run_layer(layer, req, res, rest).await;
             }
         }
 
@@ -809,11 +1029,17 @@ impl Cpeak {
         }
     }
 
-    // Run all the middleware functions (before_each functions) before we run the corresponding route
-    async fn run_middleware(&self, req: &mut CpeakRequest, res: &mut CpeakResponse) {
+    // Run all the middleware functions (before_each functions), from the one at index `from` on,
+    // before we run the corresponding route
+    async fn run_middleware(
+        self: &Arc<Self>,
+        req: &mut CpeakRequest,
+        res: &mut CpeakResponse,
+        from: usize,
+    ) {
         let next_called = NextCalled::default();
 
-        for middleware in &self.middleware {
+        for (index, middleware) in self.middleware.iter().enumerate().skip(from) {
             if let Err(error) =
                 CatchUnwind(next_called.run(middleware.call(req, res, next_fn()))).await
             {
@@ -823,15 +1049,25 @@ impl Cpeak {
             if !next_called.get() {
                 return;
             }
+            // A cpeak::layer(): its layer wraps the rest of the request
+            if let Some(layer) = req.pending_layer.take() {
+                let rest = RestOfChain::BeforeEach {
+                    app: self.clone(),
+                    from: index + 1,
+                };
+                return self.run_layer(layer, req, res, rest).await;
+            }
         }
 
         // Our exit point...
         // (the router matches the method without caring about its case, so no need to lower-case it)
-        let found = self.router.find(&req.method, path_of(req.original_url()));
+        let found = self
+            .router
+            .find(req.method().as_str(), path_of(req.original_url()));
         if let Some(found) = found {
             req.params = found.params;
             return self
-                .run_handler(req, res, found.middleware, found.handler, &next_called)
+                .run_handler(req, res, found.middleware, found.handler, 0, &next_called)
                 .await;
         }
 
@@ -845,8 +1081,20 @@ impl Cpeak {
 
         // If the requested route does not exist, and developer has not registered the fallback handler, return 404
         let _ = res.status(404).json(serde_json::json!({
-            "error": format!("Cannot {} {}", req.method, path_of(req.original_url()))
+            "error": format!("Cannot {} {}", req.method(), path_of(req.original_url()))
         }));
+    }
+
+    async fn run_layer(
+        &self,
+        layer: &'static dyn DynLayer,
+        req: &mut CpeakRequest,
+        res: &mut CpeakResponse,
+        rest: RestOfChain,
+    ) {
+        if let Err(error) = CatchUnwind(layer.run(req, res, rest)).await {
+            self.dispatch_error(error, req, res).await;
+        }
     }
 
     // Routes every error path through the registered handleErr. Awaits
@@ -934,6 +1182,45 @@ impl Cpeak {
     // a socket address, like "127.0.0.1:3000". The callback runs once the server is listening.
     pub fn listen(self, address: impl ListenAddress, cb: impl FnOnce()) -> CpeakServer {
         internal::server::listen(self, address, cb)
+    }
+}
+
+// What a cpeak::layer() wraps: the before_each functions from `from` on and the route, or a
+// route's middleware functions from `from` on and its handler
+#[derive(Clone)]
+pub(crate) enum RestOfChain {
+    BeforeEach { app: Arc<Cpeak>, from: usize },
+    Route { app: Arc<Cpeak>, from: usize },
+}
+
+impl RestOfChain {
+    pub(crate) fn run<'b>(
+        &'b self,
+        req: &'b mut CpeakRequest,
+        res: &'b mut CpeakResponse,
+    ) -> types::LocalBoxFuture<'b, ()> {
+        Box::pin(async move {
+            match self {
+                RestOfChain::BeforeEach { app, from } => app.run_middleware(req, res, *from).await,
+                RestOfChain::Route { app, from } => {
+                    let found = app
+                        .router
+                        .find(req.method().as_str(), path_of(req.original_url()));
+                    if let Some(found) = found {
+                        let next_called = NextCalled::default();
+                        app.run_handler(
+                            req,
+                            res,
+                            found.middleware,
+                            found.handler,
+                            *from,
+                            &next_called,
+                        )
+                        .await
+                    }
+                }
+            }
+        })
     }
 }
 

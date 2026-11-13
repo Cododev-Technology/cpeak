@@ -64,7 +64,7 @@ pub fn cors(options: impl Into<Option<CorsOptions>>) -> impl Middleware {
     let is_any_origin = matches!(&*origin, OriginInput::String(origin) if origin == "*");
 
     async move |req: &mut CpeakRequest, res: &mut CpeakResponse, next: Next| {
-        let request_origin = req.headers.get("origin").cloned().unwrap_or_default();
+        let request_origin = req.header("origin").unwrap_or_default().to_owned();
 
         // Not a CORS request, nothing to do.
         if request_origin.is_empty() {
@@ -96,8 +96,8 @@ pub fn cors(options: impl Into<Option<CorsOptions>>) -> impl Middleware {
             res.set_header("Access-Control-Expose-Headers", &exposed_headers);
         }
 
-        let is_preflight =
-            req.method == "OPTIONS" && req.headers.contains_key("access-control-request-method");
+        let is_preflight = req.method() == http::Method::OPTIONS
+            && req.headers().contains_key("access-control-request-method");
 
         if !is_preflight {
             return next();
@@ -109,7 +109,8 @@ pub fn cors(options: impl Into<Option<CorsOptions>>) -> impl Middleware {
             res.set_header("Access-Control-Allow-Headers", &allowed_headers);
         } else if is_any_origin {
             // If origin is *, just act like an echo chamber for requested headers. Give back whatever the browser asks for.
-            if let Some(requested) = req.headers.get("access-control-request-headers") {
+            let requested = req.joined_header("access-control-request-headers", ", ");
+            if !requested.is_empty() {
                 res.set_header("Access-Control-Allow-Headers", requested);
             }
         } else {

@@ -27,13 +27,13 @@ async fn require_auth(
     _res: &mut CpeakResponse,
     next: Next,
 ) -> Result<(), CpeakError> {
-    let Some(token) = req.headers.get("authorization") else {
+    let Some(token) = req.header("authorization") else {
         return Err(CpeakError::new(401, "Unauthorized."));
     };
     let Some(result) = req.verify_token(token).await? else {
         return Err(CpeakError::new(401, "Unauthorized."));
     };
-    req.set("user", json!({ "id": result.user_id }));
+    req.set(json!({ "id": result.user_id }));
     next()
 }
 
@@ -113,11 +113,11 @@ fn server() -> u16 {
         });
 
         server.route_with("get", "/profile", require_auth, async |req, res| {
-            res.json(json!({ "user": req.get::<Value>("user") }))
+            res.json(json!({ "user": req.get::<Value>() }))
         });
 
         server.route_with("delete", "/logout", require_auth, async |req, res| {
-            if let Some(token) = req.headers.get("authorization") {
+            if let Some(token) = req.header("authorization") {
                 req.logout(token).await?;
             }
             res.status(200).json(json!({ "message": "logged out" }))

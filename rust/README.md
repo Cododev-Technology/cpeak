@@ -29,7 +29,9 @@ Cpeak started as an educational project, and we now run our own products on it. 
   - [Route Middleware](#route-middleware)
   - [Fallback Handler](#fallback-handler)
   - [URL Variables & Parameters](#url-variables--parameters)
+  - [The Method, URL and Headers](#the-method-url-and-headers)
   - [Reading the Request Body](#reading-the-request-body)
+  - [Using Crates of the Ecosystem](#using-crates-of-the-ecosystem)
   - [Sending a Response](#sending-a-response)
   - [After the Response Is Sent](#after-the-response-is-sent)
   - [Sending Files](#sending-files)
@@ -146,11 +148,15 @@ If you add a middleware function, that function will run before your route logic
 After calling `next`, the next middleware function is going to run if there’s any; otherwise, the route logic is going to run. `next()` returns `Ok(())`, so you can end your middleware with it. If a middleware function returns without calling `next`, nothing after it runs, so make sure to send a response in that case.
 
 ```rust
+#[derive(Clone)]
+struct User {
+    id: u32,
+}
+
 server.before_each(async |req, res, next| {
-    if req.headers.contains_key("authentication") {
+    if let Some(token) = req.header("authorization") {
         // Your authentication logic...
-        req.set("userId", "<something>");
-        req.set("custom", "This is some string");
+        req.set(User { id: 42 });
         next()
     } else {
         // Return an error and close the request...
@@ -160,24 +166,27 @@ server.before_each(async |req, res, next| {
 
 server.before_each(async |req, res, next| {
     println!(
-        "The custom value was added from the previous middleware: {}",
-        req.get::<&str>("custom").unwrap()
+        "The user was added from the previous middleware: {}",
+        req.get::<User>().unwrap().id
     );
     next()
 });
 ```
 
-In Rust, you can't add new properties to an object at runtime, so to attach your own values to the request, use `req.set("name", value)`, and read them later with `req.get::<Type>("name")`. The value can be of any type.
+In Rust, you can't add new properties to an object at runtime, so to attach your own values to the request (like `req.user = user` in Node.js), use `req.set(value)`, and read them later with `req.get::<Type>()`. The type is the key, so there's one value per type. To keep, say, a `String` apart from other strings, wrap it in a type of your own: `struct SessionId(String)`. Values need to implement `Clone`, `Send` and `Sync`, which plain data does. Tower layers keep their values the same way (they're the extensions of the `http::Request`), so a value a layer adds, like tower-http's `RequestId`, is there for `req.get()` too.
 
 ### Route Middleware
 
 You can also add middleware functions for a particular route handler. Rust doesn't have variadic functions, so routes with middleware use `server.route_with()`, which takes the middleware as the third argument:
 
 ```rust
+#[derive(Clone)]
+struct Note(&'static str);
+
 let require_auth = async |req: &mut CpeakRequest, res: &mut CpeakResponse, next: Next| {
     // Check if user is logged in, if so then:
-    if req.headers.contains_key("authorization") {
-        req.set("test", "this is a test value");
+    if req.header("authorization").is_some() {
+        req.set(Note("this is a test value"));
         return next();
     }
 
@@ -186,7 +195,7 @@ let require_auth = async |req: &mut CpeakRequest, res: &mut CpeakResponse, next:
 };
 
 server.route_with("get", "/profile", require_auth, async |req, res| {
-    println!("{}", req.get::<&str>("test").unwrap()); // this is a test value
+    println!("{}", req.get::<Note>().unwrap().0); // this is a test value
     Ok(())
 });
 ```
@@ -254,6 +263,20 @@ server.route("patch", "/test/:title/more-text", async |req, res| {
 
 Both `req.params` and `req.query` are a `HashMap<String, String>`, so use `.get()` when a value might be missing.
 
+### The Method, URL and Headers
+
+```rust
+server.route("get", "/whoami", async |req, res| {
+    let method = req.method();                    // GET (and req.method() == "GET" is true)
+    let url = req.url();                          // the path and the query string, like /whoami?x=1
+    let agent = req.header("user-agent");         // Some("curl/8.7.1"), in any case of the name
+    let all_tags = req.headers().get_all("x-tag"); // a header the client sent more than once
+    Ok(())
+});
+```
+
+`req.header()` gives the first value of a header, as text, and `req.headers()` all of them, as an `http::HeaderMap`: the same type that hyper, axum and tower use. Cpeak gives you the `http` crate as `cpeak::http`, so you don't need to add it yourself.
+
 ### Reading the Request Body
 
 A JSON body is read and parsed for you by [parse_json](#parse_json). For any other body, like plain text or a file upload, use `req.chunk()`. It's what `req.on("data", ...)` is in Node.js: every call gives you the next chunk of the body, and `None` once the whole body has been read.
@@ -287,6 +310,95 @@ server.route("post", "/notes", async |req, res| {
     return res.status(201).json(json!({ "length": note.len() }));
 });
 ```
+
+### Using Crates of the Ecosystem
+
+Cpeak is built on hyper and tokio, and speaks the types that the rest of the Rust HTTP ecosystem uses (the `http` crate's), so crates made for axum, tower and hyper work with it.
+
+**Tower layers** are the middleware of that ecosystem: the timeouts, request ids, compression and body limits of [tower-http](https://docs.rs/tower-http), rate limiting with [tower_governor](https://docs.rs/tower_governor), sessions with [tower-sessions](https://docs.rs/tower-sessions), and middleware written with axum's `middleware::from_fn`. Add one with `cpeak::layer()`, wherever you'd add a middleware function:
+
+```rust
+use tower_http::timeout::TimeoutLayer;
+
+server.before_each(parse_json(None));
+server.before_each(cpeak::layer(TimeoutLayer::with_status_code(
+    StatusCode::REQUEST_TIMEOUT,
+    Duration::from_secs(10),
+)));
+server.before_each(require_auth);
+
+// Or for a single route, in the tuple of its middleware
+server.route_with("get", "/report", (require_auth, cpeak::layer(CompressionLayer::new())), report);
+```
+
+A layer wraps everything that comes after it: the middleware functions you add after it, and the route. Unlike a middleware function, it also sees the response, so it can time the whole request, put a timeout on it, or change what goes out. In the example above, the timeout covers `require_auth` and the route, but not `parse_json`. A layer can also answer by itself, without the route running, like a rate limiter does:
+
+```rust
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
+
+// 2 requests a second for each IP address, in bursts of up to 5
+let config = GovernorConfigBuilder::default().per_second(2).burst_size(5).finish().unwrap();
+server.before_each(cpeak::layer(GovernorLayer::new(config)));
+```
+
+tower_governor, like other crates made for axum, looks for the client's address where axum puts it. Turn on Cpeak's `axum` feature for that: `cpeak = { version = "0.5", features = ["axum"] }`.
+
+The values a layer adds to the request are there for `req.get()`, like the `Session` of tower-sessions:
+
+```rust
+server.route_with("get", "/visits", cpeak::layer(SessionManagerLayer::new(MemoryStore::default())), async |req, res| {
+    let session = req.get::<Session>().cloned().unwrap();
+    let visits = session.get::<u32>("visits").await?.unwrap_or(0) + 1;
+    session.insert("visits", visits).await?;
+    res.json(json!({ "visits": visits }))
+});
+```
+
+Your handlers run on the thread that received the request, and so does everything a layer wraps. A layer that runs the rest of the request on another thread (a thread of its own, or `cpeak::spawn`) doesn't work: Cpeak stops it with a panic. A layer that uses `tokio::spawn` works, since every worker thread has its own runtime.
+
+**Tower services** answer requests, like a whole axum `Router`, or the GraphQL server of [async-graphql](https://docs.rs/async-graphql). Use one as a route handler with `cpeak::service()`:
+
+```rust
+let api = axum::Router::new().route("/api/users/{id}", get(get_user));
+
+server.route("get", "/api/*", cpeak::service(api.clone()));
+server.route("post", "/api/*", cpeak::service(api));
+server.route("post", "/graphql", cpeak::service(GraphQL::new(schema)));
+```
+
+Your middleware functions run before the service, and the headers they set go out along with its response. The service gets the request as it is, so if a `parse_json()` before it has read the body already, the service gets an empty body.
+
+**WebSockets** come from the crates that do them, like [fastwebsockets](https://docs.rs/fastwebsockets) here. `req.as_http_mut()` is the request as an `http::Request`, for the crates that take one, and `res.send_response()` sends a response that another crate made:
+
+```rust
+use fastwebsockets::{upgrade, Frame, OpCode};
+
+server.route("get", "/ws", async |req, res| {
+    let (response, websocket) = upgrade::upgrade(req.as_http_mut())
+        .map_err(|_| CpeakError::new(400, "Expected a WebSocket upgrade"))?;
+
+    cpeak::spawn_local(async move {
+        let Ok(mut websocket) = websocket.await else { return };
+        // Send back every message
+        while let Ok(frame) = websocket.read_frame().await {
+            match frame.opcode {
+                OpCode::Close => break,
+                OpCode::Text | OpCode::Binary => {
+                    let echo = Frame::new(true, frame.opcode, None, frame.payload);
+                    if websocket.write_frame(echo).await.is_err() {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    res.send_response(response) // the 101 Switching Protocols
+});
+```
+
+Since it's a route like any other, `route_with()` can check who's connecting before the upgrade. WebSockets work over HTTPS too (`wss://`), with Cpeak's [https](#https) option. When the server closes, `cpeak::closing()` tells a WebSocket to say goodbye (see [Shutting Down](#shutting-down)).
 
 ### Sending a Response
 
@@ -328,8 +440,8 @@ use std::time::Instant;
 
 server.before_each(async |req, res, next| {
     let started = Instant::now();
-    let method = req.method.clone();
-    let url = req.url.clone();
+    let method = req.method().clone();
+    let url = req.url().to_owned();
 
     res.on_finish(move |res| {
         println!(
@@ -653,7 +765,7 @@ server.before_each(cpeak::log_requests(RequestLogOptions {
     only_errors: false,                              // only a status of 400 and above
     slower_than: Some(Duration::from_millis(500)),   // only the slow ones
     sample: Some(100),                               // only 1 in 100
-    skip: Some(|req, _res| req.url == "/health"),    // your own rule
+    skip: Some(|req, _res| req.url() == "/health"),    // your own rule
 }));
 ```
 
@@ -825,6 +937,23 @@ cpeak::on_shutdown(async || {
 Your function runs once the requests in progress are done, and the program exits (with code 0) when it's done too. You can add as many as you want, and they run in the order you added them. `server.wait()` doesn't return in the meantime, so there is nothing to add to your `fn main`.
 
 It works the same for a program [without a server](#without-a-server): the functions run when `SIGTERM` arrives, and then the program exits. (`SIGTERM` is a Unix thing, so on Windows this does nothing.)
+
+Some work doesn't end with a request, like a WebSocket or a task started with `cpeak::spawn_local()`. Once the requests in progress are done, the server gives that work 10 seconds to finish, and then stops it. To change that, pass `shutdown_timeout` to `Cpeak::new` (like `Some(Duration::from_secs(30))`). The same goes for `server.close()`.
+
+To wrap such work up on time, wait for `cpeak::closing()`. It resolves as soon as the server starts closing:
+
+```rust
+loop {
+    tokio::select! {
+        frame = websocket.read_frame() => { /* ... */ }
+        _ = cpeak::closing() => {
+            // 1001: the server is going away, and the browser can reconnect later
+            let _ = websocket.write_frame(Frame::close(1001, b"server restarting")).await;
+            break;
+        }
+    }
+}
+```
 
 ### HTTPS
 
@@ -1236,13 +1365,19 @@ Once set up, the following methods are available on `req` inside your routes and
 Here are the two most common middleware patterns you'll want to set up:
 
 ```rust
+// The logged-in user, for your routes: req.get::<CurrentUser>()
+#[derive(Clone)]
+struct CurrentUser {
+    id: String,
+}
+
 // Returns a 401 error if the request has no valid token. Use on protected routes.
 async fn require_auth(
     req: &mut CpeakRequest,
     res: &mut CpeakResponse,
     next: Next,
 ) -> Result<(), CpeakError> {
-    let Some(token) = req.headers.get("authorization") else {
+    let Some(token) = req.header("authorization") else {
         return Err(CpeakError::new(401, "Unauthorized."));
     };
 
@@ -1250,7 +1385,7 @@ async fn require_auth(
         return Err(CpeakError::new(401, "Unauthorized."));
     };
 
-    req.set("user", json!({ "id": result.user_id }));
+    req.set(CurrentUser { id: result.user_id });
     next()
 }
 
@@ -1261,9 +1396,9 @@ async fn optional_auth(
     _res: &mut CpeakResponse,
     next: Next,
 ) -> Result<(), CpeakError> {
-    if let Some(token) = req.headers.get("authorization") {
+    if let Some(token) = req.header("authorization") {
         if let Some(result) = req.verify_token(token).await? {
-            req.set("user", json!({ "id": result.user_id }));
+            req.set(CurrentUser { id: result.user_id });
         }
     }
     next()
@@ -1313,6 +1448,13 @@ use cpeak::{
     Next,
 };
 
+// Your own values on the request: req.set(Custom("...")), then req.get::<Custom>()
+#[derive(Clone)]
+struct Custom(&'static str);
+
+#[derive(Clone)]
+struct Whatever(&'static str);
+
 fn main() {
     let mut server = Cpeak::new(CpeakOptions {
         mime_types: HashMap::from([("mp3".into(), "audio/mpeg".into())]),
@@ -1341,14 +1483,14 @@ fn main() {
 
     // Adding custom middleware functions
     server.before_each(async |req, res, next| {
-        req.set("custom", "This is some string");
+        req.set(Custom("This is some string"));
         next()
     });
 
     // A middleware function that can be specified to run before some particular routes
     let test_route_middleware =
         async |req: &mut CpeakRequest, res: &mut CpeakResponse, next: Next| {
-            req.set("whatever", "some calculated value maybe");
+            req.set(Whatever("some calculated value maybe"));
 
             if req.params.get("test").map(String::as_str) != Some("something special") {
                 return Err(CpeakError::new(400, "an error message"));

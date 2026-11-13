@@ -35,7 +35,7 @@ fn server() -> u16 {
 
         // Added before the routes run, so it sees the status that they end up sending
         server.before_each(async |req, res, next| {
-            let path = req.url.clone();
+            let path = req.url().to_owned();
             res.on_finish(move |res| {
                 record(&path, format!("{} {}", res.status_code, res.status_message));
             });
@@ -53,9 +53,9 @@ fn server() -> u16 {
         server.route("get", "/moved", async |_req, res| res.redirect("/ok"));
 
         server.route("get", "/in-order", async |req, res| {
-            let path = req.url.clone();
+            let path = req.url().to_owned();
             res.on_finish(move |_res| record(&path, "second".to_string()));
-            let path = req.url.clone();
+            let path = req.url().to_owned();
             res.on_finish(move |_res| record(&path, "third".to_string()));
             res.end("")
         });
@@ -69,7 +69,7 @@ fn server() -> u16 {
         server.route("get", "/stream", async |req, res| {
             res.set_header("Content-Type", "text/plain");
             res.write("one ").await?;
-            assert!(recorded(&req.url).is_empty());
+            assert!(recorded(req.url()).is_empty());
             res.write("two ").await?;
             res.end("three")
         });

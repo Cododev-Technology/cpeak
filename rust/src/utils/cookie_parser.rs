@@ -154,8 +154,9 @@ pub fn cookie_parser(options: impl Into<Option<CookieParserOptions>>) -> impl Mi
     let secret: Option<&'static str> = secret.map(|secret| &*Box::leak(secret.into_boxed_str()));
 
     async move |req: &mut CpeakRequest, res: &mut CpeakResponse, next: Next| {
-        let raw_header = req.headers.get("cookie").map_or("", String::as_str);
-        let raw = parse_raw_cookies(raw_header);
+        // A client can send its cookies in more than one Cookie header
+        let raw_header = req.joined_header("cookie", "; ");
+        let raw = parse_raw_cookies(&raw_header);
 
         let mut cookies = StringMap::new();
         let mut signed_cookies: HashMap<String, Option<String>> = HashMap::new();

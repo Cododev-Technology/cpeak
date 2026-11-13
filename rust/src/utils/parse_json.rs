@@ -38,7 +38,7 @@ pub fn parse_json(options: impl Into<Option<ParseJsonOptions>>) -> impl Middlewa
         .unwrap_or(1024 * 1024);
 
     async move |req: &mut CpeakRequest, _res: &mut CpeakResponse, next: Next| {
-        if !is_json(req.headers.get("content-type").map(String::as_str)) {
+        if !is_json(req.header("content-type")) {
             return next();
         }
 

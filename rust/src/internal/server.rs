@@ -11,8 +11,7 @@
 // Everything a worker does stays on its own thread: nothing is shared between the workers
 // while requests are being handled, so the cores never wait on each other.
 
-use std::cell::{Cell, RefCell};
-use std::collections::hash_map::Entry;
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::VecDeque;
 use std::future::{Future, IntoFuture};
 use std::io;
@@ -22,19 +21,21 @@ use std::net::{
 };
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{ready, Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use hyper::body::{Frame, Incoming, SizeHint};
-use hyper::header::{self, HeaderMap};
+use hyper::header::{self, HeaderMap, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use socket2::{Domain, Socket, Type};
 use tokio::sync::{mpsc, watch};
 
+use crate::internal::body::{HttpResponseBody, RequestBody};
 use crate::internal::event_loop;
 use crate::internal::log;
 use crate::internal::shutdown;
@@ -42,7 +43,6 @@ use crate::internal::socket;
 use crate::internal::timers;
 use crate::internal::tls;
 use crate::internal::types::ResolvedCompressionConfig;
-use crate::types::StringMap;
 use crate::{Cpeak, CpeakRequest, CpeakResponse};
 
 // The body we hand over to hyper. It's either the whole body at once (res.end(), res.json(), ...)
@@ -50,6 +50,8 @@ use crate::{Cpeak, CpeakRequest, CpeakResponse};
 pub(crate) enum ResponseBody {
     Full(Option<Bytes>),
     Stream(Rc<BodyStream>),
+    // A body from another crate (res.send_response())
+    Http(HttpResponseBody),
 }
 
 impl hyper::body::Body for ResponseBody {
@@ -65,11 +67,16 @@ impl hyper::body::Body for ResponseBody {
             ResponseBody::Stream(chunks) => chunks
                 .poll_next(cx)
                 .map(|chunk| chunk.map(|chunk| chunk.map(Frame::data))),
+            ResponseBody::Http(body) => body.poll_frame(cx),
         }
     }
 
     fn is_end_stream(&self) -> bool {
-        matches!(self, ResponseBody::Full(None))
+        match self {
+            ResponseBody::Full(body) => body.is_none(),
+            ResponseBody::Stream(_) => false,
+            ResponseBody::Http(body) => body.is_end_stream(),
+        }
     }
 
     fn size_hint(&self) -> SizeHint {
@@ -77,6 +84,7 @@ impl hyper::body::Body for ResponseBody {
             ResponseBody::Full(Some(body)) => SizeHint::with_exact(body.len() as u64),
             ResponseBody::Full(None) => SizeHint::with_exact(0),
             ResponseBody::Stream(_) => SizeHint::default(),
+            ResponseBody::Http(body) => body.size_hint(),
         }
     }
 }
@@ -215,6 +223,9 @@ struct ResponseSlot {
     // The handlers are running as part of hyper's own turn right now (see serve()). hyper
     // looks for the head as soon as they return, so there's no need to wake it up for it.
     in_hypers_turn: Cell<bool>,
+    // The connection's socket, told when a 101 Switching Protocols goes out (see SharedSocket).
+    // None when a tower layer captures the response.
+    upgraded: Option<Arc<dyn UpgradeFlag>>,
 }
 
 impl ResponseSlot {
@@ -225,6 +236,14 @@ impl ResponseSlot {
             abandoned: Cell::new(false),
             waiting: RefCell::new(None),
             in_hypers_turn: Cell::new(false),
+            upgraded: None,
+        }
+    }
+
+    fn for_connection(upgraded: Arc<dyn UpgradeFlag>) -> Self {
+        Self {
+            upgraded: Some(upgraded),
+            ..Self::new()
         }
     }
 
@@ -234,6 +253,12 @@ impl ResponseSlot {
     }
 
     fn put(&self, response: Response<ResponseBody>) {
+        // After a 101, hyper hands the connection over (see SharedSocket)
+        if response.status() == StatusCode::SWITCHING_PROTOCOLS {
+            if let Some(upgraded) = &self.upgraded {
+                upgraded.set_upgraded();
+            }
+        }
         // Nobody is left to send it. Letting go of it right here is how a streamed body finds
         // out that the client went away, so res.write() fails instead of waiting forever for
         // someone to read what it wrote.
@@ -357,6 +382,25 @@ impl Drop for ResponseSender {
         if !self.head_sent || self.stream.is_some() {
             self.abort();
         }
+    }
+}
+
+// A sender whose response goes to the CapturedHead instead of hyper (for cpeak::layer(), see
+// tower.rs)
+pub(crate) fn capture_response() -> (ResponseSender, CapturedHead) {
+    let slot = Rc::new(ResponseSlot::new());
+    (ResponseSender::new(slot.clone()), CapturedHead(slot))
+}
+
+pub(crate) struct CapturedHead(Rc<ResponseSlot>);
+
+impl CapturedHead {
+    // The response once its head is sent, or an error if it was destroyed
+    pub(crate) fn poll_head(
+        &self,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<Response<ResponseBody>>> {
+        self.0.poll_response(cx)
     }
 }
 
@@ -721,13 +765,18 @@ struct Worker {
     // There is a cpeak::log_requests(), so the requests need the time they came in
     log_requests: bool,
     closing: Cell<bool>,
+    // For cpeak::closing() on this worker's thread
+    closing_signal: watch::Sender<bool>,
     // The connections to wake up once the server starts closing (by connection id)
     connections: RefCell<Vec<Option<Waker>>>,
     free_ids: RefCell<Vec<usize>>,
+    // How many connections are open, and who waits for them all to close
+    open: Cell<usize>,
+    all_closed: RefCell<Option<Waker>>,
 }
 
 impl Worker {
-    fn new(app: Arc<Cpeak>) -> Self {
+    fn new(app: Arc<Cpeak>, closing_signal: watch::Sender<bool>) -> Self {
         let compression = app
             .compression
             .as_ref()
@@ -738,12 +787,28 @@ impl Worker {
             compression,
             log_requests,
             closing: Cell::new(false),
+            closing_signal,
             connections: RefCell::new(Vec::new()),
             free_ids: RefCell::new(Vec::new()),
+            open: Cell::new(0),
+            all_closed: RefCell::new(None),
         }
     }
 
+    // Resolves once the server is closing and none of its connections is open
+    async fn all_connections_closed(&self) {
+        std::future::poll_fn(|cx| {
+            if self.closing.get() && self.open.get() == 0 {
+                return Poll::Ready(());
+            }
+            set_waker(&mut self.all_closed.borrow_mut(), cx);
+            Poll::Pending
+        })
+        .await
+    }
+
     fn add_connection(&self) -> usize {
+        self.open.set(self.open.get() + 1);
         let mut connections = self.connections.borrow_mut();
         match self.free_ids.borrow_mut().pop() {
             Some(id) => id,
@@ -757,11 +822,21 @@ impl Worker {
     fn remove_connection(&self, id: usize) {
         self.connections.borrow_mut()[id] = None;
         self.free_ids.borrow_mut().push(id);
+        self.open.set(self.open.get() - 1);
+        if self.open.get() == 0 {
+            if let Some(waiting) = self.all_closed.borrow_mut().take() {
+                waiting.wake();
+            }
+        }
     }
 
     // The server is closing: close the idle connections, and let the others finish their request
     fn start_closing(&self) {
         self.closing.set(true);
+        self.closing_signal.send_replace(true);
+        if let Some(waiting) = self.all_closed.borrow_mut().take() {
+            waiting.wake();
+        }
         for waker in self.connections.borrow_mut().iter_mut() {
             if let Some(waker) = waker.take() {
                 waker.wake();
@@ -803,10 +878,15 @@ fn run_worker(app: Arc<Cpeak>, connections: Connections) {
         let logger = app.log.clone().unwrap_or_else(log::default_logger);
         log::start_worker(&runtime, logger);
     }
+    let shutdown_timeout = app.shutdown_timeout;
+    let (closing_signal, closing) = watch::channel(false);
+    WORKER_CLOSING.with(|worker_closing| *worker_closing.borrow_mut() = Some(closing));
+    let worker = Rc::new(Worker::new(app, closing_signal));
     let local = tokio::task::LocalSet::new();
 
+    let accepting_worker = worker.clone();
     local.spawn_local(async move {
-        let worker = Rc::new(Worker::new(app));
+        let worker = accepting_worker;
         let serve = {
             let worker = worker.clone();
             move |stream, remote_address| {
@@ -835,9 +915,33 @@ fn run_worker(app: Arc<Cpeak>, connections: Connections) {
         worker.start_closing();
     });
 
-    // Runs until every task is done: the connections, and their requests
-    runtime.block_on(local);
+    // Runs until every task is done: the connections, their requests, and what they started
+    // (WebSockets, cpeak::spawn_local()). Once the server is closing and the connections are
+    // done, what's still running gets `shutdown_timeout` to finish, and is stopped after that.
+    runtime.block_on(async {
+        let mut local = std::pin::pin!(local);
+        tokio::select! {
+            _ = &mut local => {}
+            _ = async {
+                worker.all_connections_closed().await;
+                tokio::time::sleep(shutdown_timeout).await;
+            } => {}
+        }
+    });
+    WORKER_CLOSING.with(|worker_closing| *worker_closing.borrow_mut() = None);
     log::stop_worker();
+}
+
+thread_local! {
+    // On a worker's thread, whether its server is closing (for cpeak::closing())
+    static WORKER_CLOSING: RefCell<Option<watch::Receiver<bool>>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn worker_closing() -> Option<watch::Receiver<bool>> {
+    WORKER_CLOSING
+        .try_with(|worker_closing| worker_closing.borrow().clone())
+        .ok()
+        .flatten()
 }
 
 // The timer hyper uses for the 30 seconds it gives a client to send the headers of a request.
@@ -913,14 +1017,17 @@ async fn serve_connection(worker: Rc<Worker>, stream: StdTcpStream, remote_addre
     serve_requests(worker, socket, remote_address).await;
 }
 
-// Serves the requests of a connection, one after the other, until it closes
+// Serves the requests of a connection, one after the other, until it closes or is upgraded
 async fn serve_requests<T>(worker: Rc<Worker>, socket: T, remote_address: SocketAddr)
 where
-    T: hyper::rt::Read + hyper::rt::Write + Unpin + 'static,
+    T: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
-    let socket = Rc::new(RefCell::new(HeldBack::new(socket)));
+    let socket = Arc::new(SharedSocket {
+        held: UnsafeCell::new(HeldBack::new(socket)),
+        upgraded: AtomicBool::new(false),
+    });
 
-    let slot = Rc::new(ResponseSlot::new());
+    let slot = Rc::new(ResponseSlot::for_connection(socket.clone()));
     let service = {
         let worker = worker.clone();
         service_fn(move |request: Request<Incoming>| {
@@ -933,7 +1040,8 @@ where
     };
     let connection = http1::Builder::new()
         .timer(HeaderTimer)
-        .serve_connection(HoldingBack(socket.clone()), service);
+        .serve_connection(HoldingBack(socket.clone()), service)
+        .with_upgrades();
     tokio::pin!(connection);
 
     let id = worker.add_connection();
@@ -952,7 +1060,11 @@ where
         }
         // hyper handles all the requests it has, and then we send out everything it wrote
         let done = connection.as_mut().poll(cx);
-        socket.borrow_mut().send(cx);
+        if !socket.upgraded.load(Ordering::Acquire) {
+            // SAFETY: not upgraded, so only this thread uses the socket, and hyper isn't using it
+            // between its turns (see SharedSocket)
+            unsafe { socket.get() }.send(cx);
+        }
         done.map(|_| ())
     })
     .await;
@@ -980,6 +1092,8 @@ struct HeldBack<T> {
     sent: usize,
     // The socket failed while we were sending what we held back. hyper gets the error next time.
     error: Option<io::Error>,
+    // Set once the connection is upgraded: writes go out without being held back
+    passthrough: bool,
 }
 
 impl<T: hyper::rt::Write + Unpin> HeldBack<T> {
@@ -989,6 +1103,7 @@ impl<T: hyper::rt::Write + Unpin> HeldBack<T> {
             held_back: Vec::new(),
             sent: 0,
             error: None,
+            passthrough: false,
         }
     }
 
@@ -1027,6 +1142,15 @@ impl<T: hyper::rt::Write + Unpin> HeldBack<T> {
         cx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
+        if self.passthrough {
+            ready!(self.poll_send(cx))?;
+            let written = ready!(Pin::new(&mut self.io).poll_write_vectored(cx, bufs))?;
+            // Over HTTPS, encrypted data goes out with the write, not only on a flush, since
+            // WebSocket crates don't always flush. What the client can't take yet goes out
+            // with the next read or write.
+            let _ = Pin::new(&mut self.io).poll_flush(cx);
+            return Poll::Ready(Ok(written));
+        }
         let len: usize = bufs.iter().map(|buf| buf.len()).sum();
         if !self.held_back.is_empty() && self.held_back.len() + len > HOLD_BACK_LIMIT {
             ready!(self.poll_send(cx))?;
@@ -1045,16 +1169,73 @@ impl<T: hyper::rt::Write + Unpin> HeldBack<T> {
     }
 }
 
-// The socket as hyper sees it
-struct HoldingBack<T>(Rc<RefCell<HeldBack<T>>>);
+// The socket, shared by hyper's connection (HoldingBack) and serve_requests(), which sends what
+// was held back after each of hyper's turns.
+//
+// hyper only hands a connection over for an upgrade if the socket is Send. Instead of a lock
+// on every read and write, the sharing follows a rule, which `upgraded` enforces:
+//
+// - Until a 101 Switching Protocols goes out, only the worker's thread uses the socket, in the
+//   connection's task: hyper through HoldingBack, and serve_requests() between hyper's turns.
+// - The 101 sets `upgraded` (ResponseSlot::put(), before hyper gets the response). From then on
+//   serve_requests() doesn't use the socket, so whoever hyper hands it to is its only user.
+struct SharedSocket<T> {
+    held: UnsafeCell<HeldBack<T>>,
+    upgraded: AtomicBool,
+}
 
-impl<T: hyper::rt::Read + Unpin> hyper::rt::Read for HoldingBack<T> {
+// What ResponseSlot::put() sets when a 101 goes out
+pub(crate) trait UpgradeFlag {
+    fn set_upgraded(&self);
+}
+
+impl<T> UpgradeFlag for SharedSocket<T> {
+    fn set_upgraded(&self) {
+        self.upgraded.store(true, Ordering::Release);
+    }
+}
+
+// SAFETY: one thread at a time uses the socket, by the rule above
+unsafe impl<T: Send> Send for SharedSocket<T> {}
+unsafe impl<T: Send> Sync for SharedSocket<T> {}
+
+impl<T> SharedSocket<T> {
+    // SAFETY: the caller follows the rule above and doesn't keep the reference past its call
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn get(&self) -> &mut HeldBack<T> {
+        unsafe { &mut *self.held.get() }
+    }
+}
+
+// The socket as hyper sees it
+struct HoldingBack<T>(Arc<SharedSocket<T>>);
+
+impl<T> HoldingBack<T> {
+    fn socket(&mut self) -> &mut HeldBack<T> {
+        // SAFETY: hyper, or whoever it handed the upgraded connection to, is the one using the
+        // socket (see SharedSocket)
+        let socket = unsafe { self.0.get() };
+        if !socket.passthrough && self.0.upgraded.load(Ordering::Acquire) {
+            // After the 101 nothing is held back: whoever gets the connection expects their
+            // writes to go out
+            socket.passthrough = true;
+        }
+        socket
+    }
+}
+
+impl<T: hyper::rt::Read + hyper::rt::Write + Unpin> hyper::rt::Read for HoldingBack<T> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: hyper::rt::ReadBufCursor<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.0.borrow_mut().io).poll_read(cx, buf)
+        let socket = self.get_mut().socket();
+        if socket.passthrough {
+            // Send what an upgraded connection wrote and the client couldn't take yet
+            let _ = Pin::new(&mut socket.io).poll_flush(cx);
+        }
+        Pin::new(&mut socket.io).poll_read(cx, buf)
     }
 }
 
@@ -1064,8 +1245,8 @@ impl<T: hyper::rt::Write + Unpin> hyper::rt::Write for HoldingBack<T> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        self.0
-            .borrow_mut()
+        self.get_mut()
+            .socket()
             .poll_write_vectored(cx, &[io::IoSlice::new(buf)])
     }
 
@@ -1074,23 +1255,28 @@ impl<T: hyper::rt::Write + Unpin> hyper::rt::Write for HoldingBack<T> {
         cx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        self.0.borrow_mut().poll_write_vectored(cx, bufs)
+        self.get_mut().socket().poll_write_vectored(cx, bufs)
     }
 
     fn is_write_vectored(&self) -> bool {
         true
     }
 
-    // What hyper flushes goes out at the end of its turn (see serve_connection)
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.0.borrow_mut().error.take() {
+    // What hyper flushes goes out at the end of its turn (see serve_connection). Once the
+    // connection is upgraded, a flush sends it right away.
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let socket = self.get_mut().socket();
+        if socket.passthrough {
+            return socket.poll_send(cx);
+        }
+        match socket.error.take() {
             Some(error) => Poll::Ready(Err(error)),
             None => Poll::Ready(Ok(())),
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut socket = self.0.borrow_mut();
+        let socket = self.get_mut().socket();
         ready!(socket.poll_send(cx))?;
         Pin::new(&mut socket.io).poll_shutdown(cx)
     }
@@ -1105,25 +1291,23 @@ fn start_request(
 ) -> Pin<Box<dyn Future<Output = ()>>> {
     slot.reset();
 
-    let (mut parts, incoming) = request.into_parts();
-    // req.headers, and its Accept-Encoding for res.compression
-    let (headers, accept_encoding) = incoming_headers(&parts.headers);
-    let mut req = CpeakRequest::new(
-        parts.method.as_str().to_string(),
-        request_url(&parts.uri),
-        headers,
-        remote_address,
-        incoming,
-    );
-    // The request's header map becomes the response's (emptied). hyper hands it back to us
-    // with the next request once it has sent the response, so a connection never allocates another one.
-    parts.headers.clear();
-    let mut res = CpeakResponse::new(
-        ResponseSender::new(slot.clone()),
-        &req,
-        parts.headers,
-        accept_encoding,
-    );
+    let (parts, incoming) = request.into_parts();
+    let url = request_url(&parts.uri);
+    let mut headers = parts.headers;
+    // The request's own copy of the headers, and its Accept-Encoding for res.compression
+    let accept_encoding = own_headers(&mut headers);
+
+    // The Uri is left out: the URL stays a string for req.url(), and is parsed into a Uri only
+    // if another crate asks for it (req.as_http_mut())
+    let mut http = http::Request::new(RequestBody::incoming(incoming));
+    *http.method_mut() = parts.method;
+    *http.version_mut() = parts.version;
+    *http.headers_mut() = headers;
+    // Including hyper's upgrade handle, for WebSockets
+    *http.extensions_mut() = parts.extensions;
+
+    let mut req = CpeakRequest::new(http, url, remote_address);
+    let mut res = CpeakResponse::new(ResponseSender::new(slot.clone()), &req, accept_encoding);
     res.compression = worker.compression.clone();
     let started = worker.log_requests.then(Instant::now);
     let worker = worker.clone();
@@ -1220,85 +1404,30 @@ impl Drop for Handling {
     }
 }
 
-// Build req.headers the way Node.js does: lower-cased names, and when a header is sent more
-// than once, the values are joined together (with "; " for cookie and ", " for the rest).
-// Duplicates of the headers below are discarded, just like Node.js does.
-//
-// Also gives back the Accept-Encoding header on its own, for res.compression.
-fn incoming_headers(headers: &HeaderMap) -> (StringMap, String) {
-    let mut result = StringMap::with_capacity(headers.keys_len());
-
-    // Usually every header comes once: nothing to join or discard
-    if headers.len() == headers.keys_len() {
-        let mut accept_encoding = String::new();
-        for (name, value) in headers {
-            let value = latin1_string(value.as_bytes());
-            if name == header::ACCEPT_ENCODING {
-                accept_encoding = value.clone();
-            }
-            result.insert(name.as_str().to_owned(), value);
+// hyper's header values point into its read buffer. A value still held when hyper reads again
+// (while a handler waits for a database, for example) makes hyper allocate a new buffer, so the
+// request keeps copies instead. Returns the Accept-Encoding, for res.compression.
+fn own_headers(headers: &mut HeaderMap) -> String {
+    let mut accept_encoding = String::new();
+    for (name, value) in headers.iter_mut() {
+        let copy = Bytes::copy_from_slice(value.as_bytes());
+        let sensitive = value.is_sensitive();
+        // SAFETY: the same bytes as the value hyper already checked
+        *value = unsafe { HeaderValue::from_maybe_shared_unchecked(copy) };
+        if sensitive {
+            value.set_sensitive(true);
         }
-        return (result, accept_encoding);
-    }
-
-    for (name, value) in headers {
-        let name = name.as_str();
-        let value = latin1_string(value.as_bytes());
-
-        match result.entry(name.to_string()) {
-            Entry::Vacant(header) => {
-                header.insert(value);
-            }
-            Entry::Occupied(mut header) => match name {
-                "age"
-                | "authorization"
-                | "content-length"
-                | "content-type"
-                | "etag"
-                | "expires"
-                | "from"
-                | "host"
-                | "if-modified-since"
-                | "if-unmodified-since"
-                | "last-modified"
-                | "location"
-                | "max-forwards"
-                | "proxy-authorization"
-                | "referer"
-                | "retry-after"
-                | "server"
-                | "user-agent" => {}
-                "cookie" => {
-                    let existing = header.get_mut();
-                    existing.push_str("; ");
-                    existing.push_str(&value);
-                }
-                _ => {
-                    let existing = header.get_mut();
-                    existing.push_str(", ");
-                    existing.push_str(&value);
-                }
-            },
+        if name == header::ACCEPT_ENCODING && accept_encoding.is_empty() {
+            accept_encoding = value.to_str().unwrap_or_default().to_owned();
         }
     }
-
-    let accept_encoding = result.get("accept-encoding").cloned().unwrap_or_default();
-    (result, accept_encoding)
+    accept_encoding
 }
 
-// req.url: the path and the query string, as the client sent them (like /users?filter=active)
+// req.url(): the path and the query string, as the client sent them (like /users?filter=active)
 fn request_url(uri: &hyper::Uri) -> String {
     match uri.path_and_query() {
         Some(path_and_query) if uri.scheme().is_none() => path_and_query.as_str().to_owned(),
         _ => uri.to_string(),
     }
-}
-
-// Header values are Latin-1 (ISO-8859-1) strings
-fn latin1_string(bytes: &[u8]) -> String {
-    if bytes.is_ascii() {
-        // SAFETY: ASCII is valid UTF-8
-        return unsafe { String::from_utf8_unchecked(bytes.to_vec()) };
-    }
-    bytes.iter().map(|&byte| byte as char).collect()
 }

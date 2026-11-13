@@ -9,11 +9,17 @@ use cpeak::{
     CpeakResponse, FindToken, Next, RevokeToken, SameSite, SaveToken, TokenRecord,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
 // In-memory storage for tokens and users. In a real application, you would use a database for them.
 static TOKENS: LazyLock<Mutex<HashMap<String, TokenRecord>>> = LazyLock::new(Default::default);
 static USERS: LazyLock<Mutex<Vec<User>>> = LazyLock::new(Default::default);
+
+// The logged-in user, attached to the request by the middleware
+#[derive(Clone, serde::Serialize)]
+struct CurrentUser {
+    id: String,
+}
 
 #[derive(Clone)]
 struct User {
@@ -41,7 +47,7 @@ pub async fn require_auth(
         return Err(CpeakError::new(401, "Unauthorized."));
     };
 
-    req.set("user", json!({ "id": result.user_id }));
+    req.set(CurrentUser { id: result.user_id });
     next()
 }
 
@@ -52,7 +58,7 @@ pub async fn optional_auth(
 ) -> Result<(), CpeakError> {
     if let Some(token) = req.cookies.get("session") {
         if let Some(result) = req.verify_token(token).await? {
-            req.set("user", json!({ "id": result.user_id }));
+            req.set(CurrentUser { id: result.user_id });
         }
     }
     next()
@@ -156,7 +162,7 @@ fn main() {
     });
 
     app.route_with("get", "/profile", require_auth, async |req, res| {
-        return res.json(json!({ "user": req.get::<Value>("user") }));
+        return res.json(json!({ "user": req.get::<CurrentUser>() }));
     });
 
     app.route_with("delete", "/logout", require_auth, async |req, res| {

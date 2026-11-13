@@ -9,7 +9,9 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+use tokio::sync::watch;
 
 use crate::internal::server::CpeakServer;
 
@@ -50,6 +52,30 @@ pub(crate) fn add_server(server: CpeakServer) {
 // Whether the program is on its way out
 pub(crate) fn is_shutting_down() -> bool {
     SHUTTING_DOWN.load(Ordering::SeqCst)
+}
+
+// Resolves when the server starts closing, so long-running work can wrap up, like a WebSocket
+// that sends its close frame:
+//
+//     tokio::select! {
+//         frame = websocket.read_frame() => { ... }
+//         _ = cpeak::closing() => { /* send a close frame and stop */ }
+//     }
+//
+// On a server's thread (in routes, middleware functions and their cpeak::spawn_local() tasks),
+// it's when that server closes. Elsewhere, it's when the program is asked to stop (SIGTERM).
+pub async fn closing() {
+    let mut closing = match crate::internal::server::worker_closing() {
+        Some(closing) => closing,
+        None => program_closing().subscribe(),
+    };
+    // It fails only once the server is gone, which counts as closing too
+    let _ = closing.wait_for(|closing| *closing).await;
+}
+
+fn program_closing() -> &'static watch::Sender<bool> {
+    static CLOSING: OnceLock<watch::Sender<bool>> = OnceLock::new();
+    CLOSING.get_or_init(|| watch::channel(false).0)
 }
 
 // SIGTERM is how a Unix system asks a program to stop. Elsewhere there is nothing to listen for.
@@ -97,6 +123,7 @@ fn listen_for_sigterm() {}
 async fn shut_down() {
     let _exit_on_panic = ExitOnPanic;
     SHUTTING_DOWN.store(true, Ordering::SeqCst);
+    program_closing().send_replace(true);
 
     // Stop accepting new connections, and let the requests in progress finish
     let servers = std::mem::take(&mut *lock(&SERVERS));

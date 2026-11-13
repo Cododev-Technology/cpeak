@@ -21,6 +21,13 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 bytes = "1"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+tower-service = "0.3"
+tower-layer = "0.3"
+axum-core = { version = "0.5", default-features = false }
+axum = { version = "0.8", default-features = false, features = ["tokio"], optional = true }
 socket2 = { version = "0.6", features = ["all"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -58,12 +65,30 @@ mimalloc = ["dep:mimalloc"]
 # json!({ "zebra": 1, "apple": 2 }) is sent as {"zebra":1,"apple":2}, and req.body has its keys
 # in the order the client sent them. Without it, they are sorted by name.
 preserve_order = ["serde_json/preserve_order"]
+# The client's address also as axum's ConnectInfo<SocketAddr>, for the crates made for axum that
+# look for it there (like tower_governor's default key extractor). Off by default, since it
+# compiles a part of axum.
+axum = ["dep:axum"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 # The HTTPS tests need a client that speaks TLS
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# The tests that check that crates of the ecosystem work with Cpeak: a WebSocket upgrade,
+# tower-http's layers, and a whole axum Router as a route
+fastwebsockets = { version = "0.10", features = ["upgrade"] }
+tower-http = { version = "0.6", features = ["timeout", "set-header", "request-id", "compression-gzip", "limit"] }
+axum = { version = "0.8", default-features = false }
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
+# The tests run with the `axum` feature on
+cpeak = { path = ".", features = ["axum"] }
+tower-sessions = { version = "0.14", default-features = false, features = ["memory-store"] }
+tower = { version = "0.5", features = ["buffer"] }
+http-body-util = "0.1"
+tower-layer = "0.3"
+tower-service = "0.3"
+http-body = "1"
 
 # Password hashing (PBKDF2) and compression are CPU heavy, so we optimize the
 # dependencies even in debug builds to keep the tests and examples snappy.

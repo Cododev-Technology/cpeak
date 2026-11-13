@@ -23,11 +23,11 @@ fn server() -> u16 {
         });
 
         server.fallback(async |req, res| {
-            if req.url == "/boom" {
+            if req.url() == "/boom" {
                 return Err(CpeakError::other("fallback boom"));
             }
             res.status(418)
-                .json(json!({ "matched": "fallback", "method": req.method }))
+                .json(json!({ "matched": "fallback", "method": req.method().as_str() }))
         });
 
         server

@@ -20,7 +20,7 @@ fn server() -> u16 {
         });
 
         server.before_each(async |req, _res, next| {
-            req.set("foo", "text");
+            req.set("text");
             next()
         });
 
@@ -33,7 +33,7 @@ fn server() -> u16 {
 
         server.route("get", "/bar", async |req, res| {
             res.status(200)
-                .json(json!({ "message": req.get::<&str>("foo") }))
+                .json(json!({ "message": req.get::<&str>() }))
         });
 
         server.route("get", "/bar-more", async |_req, res| res.json(json!({})));

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use crate::internal::errors::CpeakError;
 use crate::internal::types::{CompressionOptions, HttpsOptions, LogOptions};
@@ -17,6 +18,10 @@ pub struct CpeakOptions {
     pub background_threads: Option<usize>,
     // Where cpeak::log() and cpeak::log_requests() write
     pub log: Option<LogOptions>,
+    // When the server closes and its connections are done, how long it waits for what is still
+    // running on its threads (WebSockets, cpeak::spawn_local() tasks) before stopping it
+    // (10 seconds if you leave it out). See cpeak::closing().
+    pub shutdown_timeout: Option<Duration>,
 }
 
 pub type StringMap = HashMap<String, String>;

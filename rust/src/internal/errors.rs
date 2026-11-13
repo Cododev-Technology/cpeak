@@ -78,6 +78,23 @@ where
     }
 }
 
+impl CpeakError {
+    // From the boxed error of another crate (a tower Layer or Service, a body)
+    pub(crate) fn from_boxed(error: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        let client_disconnect = error
+            .downcast_ref::<io::Error>()
+            .is_some_and(|io_error| CLIENT_DISCONNECT_CODES.contains(&io_error.kind()));
+        Self {
+            status: None,
+            message: error.to_string(),
+            code: None,
+            cpeak_err: false,
+            client_disconnect,
+            source: Some(Arc::from(error)),
+        }
+    }
+}
+
 impl fmt::Display for CpeakError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)

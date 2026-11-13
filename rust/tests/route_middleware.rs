@@ -24,7 +24,7 @@ async fn mid2(
     _res: &mut CpeakResponse,
     next: Next,
 ) -> Result<(), CpeakError> {
-    req.set("foo", "text");
+    req.set("text");
     next()
 }
 
@@ -45,7 +45,7 @@ fn server() -> u16 {
 
         server.route_with("get", "/bar", (mid1, mid2), async |req, res| {
             res.status(200)
-                .json(json!({ "message": req.get::<&str>("foo") }))
+                .json(json!({ "message": req.get::<&str>() }))
         });
 
         server.route_with("get", "/bar-more", mid3, async |_req, res| {
@@ -54,7 +54,7 @@ fn server() -> u16 {
 
         // Route middleware only run for their own route
         server.route("get", "/plain", async |req, res| {
-            res.json(json!({ "foo": req.get::<&str>("foo") }))
+            res.json(json!({ "foo": req.get::<&str>() }))
         });
 
         server

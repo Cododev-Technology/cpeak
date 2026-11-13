@@ -37,7 +37,7 @@ fn server() -> u16 {
 
         server.handle_err(async |error, req, res| {
             // Mimics res.json failing inside handle_err (a failure while compressing, the socket closed mid-stream, etc.)
-            if req.get::<bool>("broken_json").is_some() {
+            if req.get::<bool>().is_some() {
                 return Err(CpeakError::other("simulated json rejection"));
             }
             if let Some(code) = error.code {
@@ -48,13 +48,13 @@ fn server() -> u16 {
         });
 
         server.route("get", "/handle-err-broken-json", async |req, _res| {
-            req.set("broken_json", true);
+            req.set(true);
             Err(CpeakError::new(500, "trigger handleErr"))
         });
 
         // In Rust, a panic is the closest thing to an unexpected thrown error
         server.route("get", "/panic", async |req, _res| {
-            let user: Option<&String> = req.headers.get("x-missing-user");
+            let user: Option<&str> = req.header("x-missing-user");
             let _name = user.expect("something unexpected");
             Ok(())
         });

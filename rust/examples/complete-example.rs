@@ -10,6 +10,13 @@ use cpeak::{
     Next,
 };
 
+// Your own values on the request: req.set(Custom("...")), then req.get::<Custom>()
+#[derive(Clone)]
+struct Custom(&'static str);
+
+#[derive(Clone)]
+struct Whatever(&'static str);
+
 fn main() {
     let mut server = Cpeak::new(CpeakOptions {
         mime_types: HashMap::from([("mp3".into(), "audio/mpeg".into())]),
@@ -38,14 +45,14 @@ fn main() {
 
     // Adding custom middleware functions
     server.before_each(async |req, res, next| {
-        req.set("custom", "This is some string");
+        req.set(Custom("This is some string"));
         next()
     });
 
     // A middleware function that can be specified to run before some particular routes
     let test_route_middleware =
         async |req: &mut CpeakRequest, res: &mut CpeakResponse, next: Next| {
-            req.set("whatever", "some calculated value maybe");
+            req.set(Whatever("some calculated value maybe"));
 
             if req.params.get("test").map(String::as_str) != Some("something special") {
                 return Err(CpeakError::new(400, "an error message"));
@@ -73,6 +80,10 @@ fn main() {
         "/old-url",
         test_route_middleware,
         async |req, res| {
+            // The values that the middleware functions attached
+            if let (Some(custom), Some(whatever)) = (req.get::<Custom>(), req.get::<Whatever>()) {
+                println!("{} / {}", custom.0, whatever.0);
+            }
             return res.redirect("/new-url");
         },
     );

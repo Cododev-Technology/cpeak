@@ -106,7 +106,7 @@ pub fn serve_static(
     let static_files = Arc::new(static_files);
 
     async move |req: &mut CpeakRequest, res: &mut CpeakResponse, next: Next| {
-        let pathname = req.url.split('?').next().unwrap_or("");
+        let pathname = req.url().split('?').next().unwrap_or("");
         // Just like a browser would, turn "%20" back into a space and so on
         let pathname: Cow<str> = if pathname.contains('%') {
             Cow::Owned(decode_uri_component(pathname).unwrap_or_else(|| pathname.to_string()))

@@ -384,15 +384,15 @@ impl ThreadLog {
                     let from_header = requests
                         .ip_header
                         .as_ref()
-                        .and_then(|header| req.headers.get(header))
+                        .and_then(|header| req.header(header))
                         .filter(|ip| !ip.is_empty());
                     match from_header {
                         Some(ip) => buffer.extend_from_slice(ip.as_bytes()),
                         None => write_ip(buffer, &req.remote_address),
                     }
                 }
-                Part::Method => buffer.extend_from_slice(req.method.as_bytes()),
-                // The URL the request came in with, whatever a middleware function did to req.url
+                Part::Method => buffer.extend_from_slice(req.method().as_str().as_bytes()),
+                // The URL the request came in with, whatever a middleware function did to it
                 Part::Url => buffer.extend_from_slice(req.original_url().as_bytes()),
                 Part::Path => buffer.extend_from_slice(url_path(req.original_url()).as_bytes()),
                 Part::Status => {
@@ -411,8 +411,8 @@ impl ThreadLog {
                 Part::Bytes => {
                     let _ = write!(buffer, "{}", res.body_bytes);
                 }
-                Part::Header(name) => match req.headers.get(name) {
-                    Some(value) if !value.is_empty() => buffer.extend_from_slice(value.as_bytes()),
+                Part::Header(name) => match req.joined_header(name, ", ") {
+                    value if !value.is_empty() => buffer.extend_from_slice(value.as_bytes()),
                     _ => buffer.push(b'-'),
                 },
             }

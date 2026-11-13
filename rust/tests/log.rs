@@ -235,7 +235,7 @@ fn skip() {
             },
             Some(RequestLogOptions {
                 format: "{url}".to_string(),
-                skip: Some(|req, _res| req.url == "/hello"),
+                skip: Some(|req, _res| req.url() == "/hello"),
                 ..Default::default()
             }),
         )
@@ -288,7 +288,7 @@ fn only_the_requests_that_reach_it() {
         });
         // Like serve_static(): it sends the response itself, so the request stops here
         server.before_each(async |req, res, next| {
-            if req.url == "/early" {
+            if req.url() == "/early" {
                 return res.end("sent before the log");
             }
             next()
@@ -355,7 +355,7 @@ fn the_url_the_request_came_in_with() {
             ..Default::default()
         });
         server.route_with("get", "/logged", log_requests, async |req, res| {
-            req.url = "/changed?by=handler".to_string();
+            *req.as_http_mut().uri_mut() = "/changed?by=handler".parse().unwrap();
             res.end("")
         });
         server
